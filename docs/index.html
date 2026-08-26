@@ -74,7 +74,7 @@ footer a{color:var(--muted)}
 <body>
 <div class="wrap">
 
-  <span class="pill">v0.1 &middot; draft &middot; Apache-2.0</span>
+  <span class="pill">v0.3 &middot; draft &middot; Apache-2.0</span>
   <h1>blastcheck</h1>
   <p class="lede">A Terraform plan tells you <em>what</em> will change. It does not tell you whether the change is <em>safe</em>.</p>
   <p class="sub">blastcheck reads <code>terraform show -json</code> and emits an <a href="https://github.com/prococonsulting/impact-manifest">Impact Manifest</a>: a machine-readable change-safety assertion. Free, offline, no credentials, no hosted service.</p>
@@ -105,10 +105,21 @@ terraform show -json tfplan | blastcheck &gt; manifest.json</code></pre>
   <table>
     <tr><th>Dimension</th><th>Example the plan can actually prove</th></tr>
     <tr><td><code>reversibility</code></td><td>An Azure managed disk grow is one-way. Azure cannot shrink a disk.</td></tr>
-    <tr><td><code>security_posture</code></td><td>An inbound rule opening <code>0.0.0.0/0</code> to 22 or 3389; a storage account turning on public access, lowering TLS, or flipping its firewall to default-allow.</td></tr>
+    <tr><td><code>security_posture</code></td><td>An inbound rule opening <code>0.0.0.0/0</code> to 22 or 3389; a database turning on <code>publicly_accessible</code>; a bucket set to <code>public-read</code>; encryption or deletion protection switched off.</td></tr>
     <tr><td><code>data_durability</code></td><td>A delete removes the primary copy of a data-bearing resource, and recoverability is <em>unverified</em> rather than assumed.</td></tr>
     <tr><td><code>state_confidence</code></td><td><code>drift_detected</code> when Terraform's own refresh found the resource had moved. Otherwise <code>not_verified</code> — see below.</td></tr>
   </table>
+
+  <h2>Every provider, in three layers</h2>
+  <p>Every change in a plan is assessed. Nothing is skipped for being an unfamiliar resource type.</p>
+  <table>
+    <tr><th>Layer</th><th>Applies to</th><th>Confidence</th></tr>
+    <tr><td><strong>0 — structural</strong></td><td>any provider ever written: action semantics, <code>action_reason</code>, <code>replace_paths</code>, drift, unreadable fields</td><td>high</td></tr>
+    <tr><td><strong>1 — heuristic</strong></td><td>any provider, by resource-type and attribute name and value patterns</td><td>low, tagged <code>heuristic</code></td></tr>
+    <tr><td><strong>2 — precise</strong></td><td>resource types with an exact rule (Azure disks, VMs, NSGs, storage, SQL today)</td><td>high</td></tr>
+  </table>
+  <p>On a real 55-change AWS plan, with no AWS-specific code at all, the heuristic layer finds a publicly accessible unencrypted database with final snapshots disabled, a public-read bucket, and a security group open to the internet.</p>
+  <p>Those findings are graded <code>caution</code>, never <code>blocking</code>, and their evidence is tagged <code>source: heuristic</code>. They are leads, not determinations, and saying so is the difference between a tool people read and a tool people mute. For the same reason an open <em>egress</em> rule and a default route are not flagged: both are <code>0.0.0.0/0</code> by definition, and firing on them would trip on nearly every plan ever written.</p>
 
   <h2>Drift, without asking you for credentials</h2>
   <p><code>terraform plan</code> refreshes by default: before computing a diff it reads live reality for every managed resource and records anything that moved in a top-level <code>resource_drift</code> array. That is a live-state observation already sitting inside an offline artifact. blastcheck did not perform the read. Terraform did. The fact is no less true for it.</p>
@@ -146,7 +157,7 @@ blastcheck --verify manifest.json</code></pre>
   </div>
 
   <footer>
-    <p>Scope in v0.1 is deliberately narrow: Azure managed disks, virtual machines, network security groups and rules, storage accounts, SQL databases. Anything else in a plan is recorded under <code>extensions.skipped</code>, never silently dropped. The specification does not freeze at 1.0 until this tool has run against real Terraform plans.</p>
+    <p>Precise rules currently cover Azure managed disks, virtual machines, network security groups and rules, storage accounts and SQL databases. Every other resource type, on every other provider, is still assessed structurally and heuristically — <code>extensions.assessment</code> records which layer produced each verdict. The specification does not freeze at 1.0 until this tool has been run against real Terraform plans from more than one estate.</p>
     <p>Apache-2.0. Built by <a href="https://prococonsulting.com">Kevin Proffitt</a>.</p>
   </footer>
 
