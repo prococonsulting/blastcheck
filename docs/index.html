@@ -122,7 +122,11 @@ blastcheck --verify manifest.json</code></pre>
   <h2>The format is not owned by this tool</h2>
   <p>Impact Manifest is an open specification, Apache-2.0, with no assumption of any cloud and no coupling to any implementation. blastcheck is <em>a</em> reference producer of it, not its owner. Other tools are expected to implement it, and the format is only worth anything if they do.</p>
 
+  <h2>Why this exists</h2>
+  <p><a href="/the-plan-was-right/"><strong>The plan was right. The state was wrong.</strong></a> — a Terraform apply that took production down on a change whose plan was three lines long and completely correct, and why every pre-apply tool would have passed it.</p>
+
   <div class="links">
+    <a href="/the-plan-was-right/">Read the write-up</a>
     <a href="https://github.com/prococonsulting/impact-manifest">Specification &amp; schema</a>
     <a href="https://github.com/prococonsulting/blastcheck">Source</a>
     <a href="https://pypi.org/project/blastcheck/">PyPI</a>

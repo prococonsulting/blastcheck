@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The plan was right. The state was wrong.</title>
+<meta name="description" content="A Terraform apply took production down on a change whose plan was three lines long and completely correct. Every pre-apply tool would have passed it. Here is the gap, and what closes it.">
+<link rel="canonical" href="https://blastcheck.dev/the-plan-was-right/">
+<meta property="og:title" content="The plan was right. The state was wrong.">
+<meta property="og:description" content="Every pre-apply tool reads the plan. The plan is downstream of the lie.">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://blastcheck.dev/the-plan-was-right/">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23c2410c'/><path d='M16 6l8 4v7c0 5-3.4 8-8 9-4.6-1-8-4-8-9v-7z' fill='none' stroke='white' stroke-width='2.2'/></svg>">
+<style>
+:root{
+  --bg:#fbfaf9; --fg:#1c1a18; --muted:#6b6560; --rule:#e5e1dc;
+  --accent:#b8460e; --code-bg:#f2efec; --card:#ffffff;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#141311; --fg:#e9e5e0; --muted:#9a938c; --rule:#2c2926;
+    --accent:#f08a4b; --code-bg:#1e1c1a; --card:#1a1817;
+  }
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font:16px/1.65 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:46rem; margin:0 auto; padding:4.5rem 1.5rem 6rem}
+code,pre{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+code{background:var(--code-bg); padding:.14em .38em; border-radius:4px; font-size:.88em}
+pre{
+  background:var(--code-bg); padding:1rem 1.1rem; border-radius:8px;
+  overflow-x:auto; font-size:.86rem; line-height:1.6; border:1px solid var(--rule);
+}
+pre code{background:none; padding:0; font-size:inherit}
+a{color:var(--accent)}
+a:hover{text-decoration-thickness:2px}
+h1{font-size:2.6rem; letter-spacing:-.03em; margin:0 0 .4rem; font-weight:650}
+h2{font-size:1.05rem; letter-spacing:.02em; text-transform:uppercase; color:var(--muted);
+   font-weight:600; margin:3.5rem 0 1rem}
+.lede{font-size:1.22rem; line-height:1.5; color:var(--fg); margin:0 0 .6rem; text-wrap:balance}
+.sub{color:var(--muted); margin:0 0 2.5rem}
+.rule{border:0; border-top:1px solid var(--rule); margin:0}
+.pill{
+  display:inline-block; font-size:.74rem; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--muted); border:1px solid var(--rule); border-radius:100px;
+  padding:.2rem .7rem; margin-bottom:1.6rem;
+}
+.callout{
+  background:var(--card); border:1px solid var(--rule); border-left:3px solid var(--accent);
+  border-radius:8px; padding:1.1rem 1.25rem; margin:1.5rem 0;
+}
+.callout p{margin:0}
+.callout strong{color:var(--accent)}
+table{width:100%; border-collapse:collapse; font-size:.92rem; margin:1rem 0}
+th,td{text-align:left; padding:.55rem .6rem; border-bottom:1px solid var(--rule); vertical-align:top}
+th{font-weight:600; color:var(--muted); font-size:.8rem; text-transform:uppercase; letter-spacing:.04em}
+td code{white-space:nowrap}
+.links{display:flex; flex-wrap:wrap; gap:.6rem; margin-top:1.2rem}
+.links a{
+  border:1px solid var(--rule); background:var(--card); border-radius:7px;
+  padding:.55rem .95rem; text-decoration:none; color:var(--fg); font-size:.92rem;
+}
+.links a:hover{border-color:var(--accent); color:var(--accent)}
+footer{margin-top:5rem; padding-top:1.5rem; border-top:1px solid var(--rule);
+       color:var(--muted); font-size:.87rem}
+footer a{color:var(--muted)}
+article p{margin:1.1rem 0}
+article h2{margin-top:3rem}
+.back{display:inline-block; font-size:.9rem; color:var(--muted); text-decoration:none; margin-bottom:2.5rem}
+.back:hover{color:var(--accent)}
+blockquote{margin:1.4rem 0; padding:.2rem 0 .2rem 1.1rem; border-left:3px solid var(--rule); color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<a class="back" href="/">&larr; blastcheck</a>
+<article>
+<h1 style="font-size:2.2rem;line-height:1.15;margin-bottom:1.2rem">The plan was right.<br>The state was wrong.</h1>
+
+<p class="lede">Terraform told me it was going to resize a disk. It resized a disk. Nothing about the plan was inaccurate, and nothing about the apply misbehaved.</p>
+
+<p>A few minutes later a SQL Server Always On availability group had nodes sitting in RECOVERY_PENDING, and production was down.</p>
+
+<p>I want to write about that gap, because I have now seen it more than once, and because every tool I could have run before that apply would have passed it.</p>
+
+<h2>What actually happened</h2>
+
+<p>Someone had resized that disk by hand, weeks earlier. Portal, CLI, a ticket, it does not matter. It was a reasonable thing to do at the time and nobody wrote it down anywhere Terraform could see.</p>
+
+<p>So the recorded state said one size and the disk was another size. When the pipeline ran, Terraform did what it is supposed to do: it compared its state to the configuration, found a difference, and planned a change to close it. The plan was internally consistent. It was just computed against a description of the world that had stopped being true.</p>
+
+<p>The apply went out. The disk operation collided with what was actually there. The AG nodes could not bring their databases online. Production went down, on a change whose plan output was three lines long and looked completely routine.</p>
+
+<h2>Why nothing caught it</h2>
+
+<p>Here is the part that bothers me. Walk through the pre-apply tooling most teams have, and ask what each one would have said.</p>
+
+<p><strong>Static IaC scanners</strong> (Checkov, tfsec, Terrascan, KICS) read the configuration and check it against rules about how resources should be shaped: is encryption on, is public access off, is TLS at the right version. The configuration here was fine. It had been fine for two years. Pass.</p>
+
+<p><strong>Cost tooling</strong> (Infracost and friends) reads the plan and prices the delta. A slightly larger disk is a slightly larger bill. Pass, correctly, because that is not what it is for.</p>
+
+<p><strong>Policy engines</strong> (Sentinel, OPA, Conftest, and now tfpolicy) evaluate the planned resource attributes against rules you write. You can write a rule that says <em>no disk over N gigabytes</em> or <em>no deletes in production</em>. You cannot write a rule that says <em>and also, make sure the thing you think you are changing is still the thing that is there</em>, because the policy engine is reading the same plan, and the plan is downstream of the lie.</p>
+
+<p><strong>A human reviewing the plan.</strong> I have done a lot of these. You are reading a diff. The diff says the disk goes from one number to a bigger number. There is nothing in that output that tells you the smaller number was fiction.</p>
+
+<p>Every one of those tools reads the plan. And the plan was not wrong. That is what makes this failure mode so annoying: there is no bug to find. The system worked exactly as designed, on an input that had quietly gone stale.</p>
+
+<h2>The five things a plan does not say</h2>
+
+<p><code>terraform show -json</code> is a genuinely good artifact. It gives you every resource change, the action, the before, the after. It describes <strong>what</strong> will change, completely.</p>
+
+<p>It does not describe whether the change is <strong>safe</strong>. Specifically, for every change in it, five questions go unanswered:</p>
+
+<ol>
+<li><strong>Availability.</strong> Is the affected resource currently serving traffic?</li>
+<li><strong>Reversibility.</strong> Can this be undone, by what mechanism, in what window, at what cost?</li>
+<li><strong>Data durability.</strong> Does anything become permanently unrecoverable?</li>
+<li><strong>State confidence.</strong> Does the recorded state this plan trusts still match reality?</li>
+<li><strong>Preconditions.</strong> What has to be true before apply is safe?</li>
+</ol>
+
+<p>Number four is the one that got me. The other four are about the change. Number four is about whether the plan itself is standing on solid ground, and it is the only one of the five that invalidates the other four when it goes wrong. A plan <em>trusts</em> state. When that trust is misplaced, everything derived from it is untrustworthy too, including any safety verdict you computed from it.</p>
+
+<h2>What I wanted to exist</h2>
+
+<p>I wanted a document that said this, before the apply:</p>
+
+<pre><code>{
+  "address": "azurerm_managed_disk.sql_data",
+  "state_confidence": {
+    "value": "drift_detected",
+    "verified_against_live": true,
+    "confidence": "high",
+    "rationale": "Recorded state reports 512 GB; the live resource reports 1024 GB.
+                  This plan was computed against a description of the resource that
+                  no longer matches it."
+  },
+  "availability_impact": { "value": "interrupts", "confidence": "high" },
+  "reversibility":       { "value": "irreversible",
+                           "cost": "an Azure managed disk cannot be shrunk" },
+  "severity": "blocking"
+}</code></pre>
+
+<p>Nothing exotic. Just the facts that were already available to anyone who looked at the live resource, written down in a form a pipeline could refuse to proceed on.</p>
+
+<p>And critically, I wanted it to be able to say <code>unknown</code>. Because most of the time you will not have live state access at plan time, and the honest answer is <em>I could not check this</em>, which is a completely different fact from <em>I checked and it was fine</em>. Those two get collapsed constantly, and the collapse always happens in the direction of proceeding.</p>
+
+<h2>Unproven is not safe</h2>
+
+<p>That is the whole idea, and it is the part I would defend hardest.</p>
+
+<p>A tool that says <code>safe</code> when it means <em>I found no problem</em> is worse than no tool at all, because it converts an absence of information into a green light and puts a person's name on it. A false <code>safe</code> is catastrophic. A false <code>unknown</code> is annoying. Those are not symmetrical, and a format for this has to be built around the asymmetry rather than around making the output look tidy.</p>
+
+<p>So: <code>unknown</code> has to be representable on every dimension. It has to be distinct from the benign value. A consumer must never map it to pass. And <code>safe</code> has to be a positive claim that gets earned with evidence, not granted by the absence of a known problem.</p>
+
+<p>That last one has a specific consequence I like: if you cannot verify state, you cannot say <code>safe</code> about anything downstream of that state. Not <em>probably safe</em>. Not <em>safe with a warning</em>. Unknown.</p>
+
+<h2>Where this went</h2>
+
+<p>I wrote it up as an open specification, because the format is only useful if more than one tool produces it, and a format that lives inside one vendor's product is that vendor's output schema rather than a standard. It is Apache-2.0 and it belongs to nobody:</p>
+
+<p><strong><a href="https://github.com/prococonsulting/impact-manifest">Impact Manifest</a></strong> — a JSON Schema and four worked examples. The schema is the specification.</p>
+
+<p>There is also a reference producer, <strong><a href="/">blastcheck</a></strong>, which reads <code>terraform show -json</code> and emits a conforming document. It is free, offline, and deliberately limited: it reasons from the plan alone, so wherever a verdict genuinely needs live state it says <code>unknown</code> and tells you which field defeated it.</p>
+
+<pre><code>pip install blastcheck
+terraform show -json tfplan | blastcheck &gt; manifest.json</code></pre>
+
+<p>Which means blastcheck can never emit <code>safe</code>. It never verified state, so it is not entitled to. That is not a limitation I am apologising for. It is the design working.</p>
+
+<p>I would rather it be honest about its ceiling than let anyone put a green check on a plan built from a description of the world that stopped being true.</p>
+
+</article>
+
+<footer>
+<p><a href="/">blastcheck</a> &middot; <a href="https://github.com/prococonsulting/impact-manifest">Impact Manifest specification</a> &middot; <a href="https://github.com/prococonsulting/blastcheck">Source</a></p>
+</footer>
+
+</div>
+</body>
+</html>
