@@ -1,0 +1,58 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.8",
+  "complete": true,
+  "errored": false,
+  "resource_drift": [
+    {
+      "address": "azurerm_managed_disk.sql_data",
+      "mode": "managed",
+      "type": "azurerm_managed_disk",
+      "name": "sql_data",
+      "change": {
+        "actions": ["update"],
+        "before": { "name": "sql-data-01", "disk_size_gb": 512 },
+        "after":  { "name": "sql-data-01", "disk_size_gb": 1024 }
+      }
+    },
+    {
+      "address": "azurerm_storage_account.untouched",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "untouched",
+      "change": {
+        "actions": ["update"],
+        "before": { "name": "stuntouched", "min_tls_version": "TLS1_2" },
+        "after":  { "name": "stuntouched", "min_tls_version": "TLS1_0" }
+      }
+    }
+  ],
+  "resource_changes": [
+    {
+      "address": "azurerm_managed_disk.sql_data",
+      "mode": "managed",
+      "type": "azurerm_managed_disk",
+      "name": "sql_data",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["update"],
+        "before": { "name": "sql-data-01", "disk_size_gb": 512 },
+        "after":  { "name": "sql-data-01", "disk_size_gb": 768 },
+        "after_unknown": {}, "before_sensitive": {}, "after_sensitive": {}
+      }
+    },
+    {
+      "address": "azurerm_network_security_group.clean",
+      "mode": "managed",
+      "type": "azurerm_network_security_group",
+      "name": "clean",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": { "name": "clean-nsg", "security_rule": [] },
+        "after_unknown": { "id": true }, "before_sensitive": {}, "after_sensitive": {}
+      }
+    }
+  ]
+}

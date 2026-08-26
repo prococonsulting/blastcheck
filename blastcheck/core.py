@@ -8,7 +8,14 @@ with a stated reason rather than guessing. That honesty is the whole point —
 a plan-only tool structurally cannot certify `safe` (it never verified live
 state), and the manifest says so instead of pretending.
 
-Scope (v0.1, narrow on purpose): Azure managed disks, virtual machines, network
+One exception to "plan-only", and it is the important one: `terraform plan`
+refreshes by default, and records what that refresh found in a top-level
+`resource_drift` array. That is a live-state observation sitting inside an
+offline artifact. blastcheck did not perform the read, but it reads the result —
+so drift IS determined, and a plan modifying an already-drifted resource is the
+single highest-severity finding this tool produces.
+
+Scope (narrow on purpose): Azure managed disks, virtual machines, network
 security groups (+ rules), storage accounts, and SQL databases. Anything else in
 the plan is recorded under `extensions.skipped`, never silently dropped.
 
@@ -23,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 SCHEMA_VERSION = "0.1.0"
-PRODUCER_VERSION = "0.1.1"
+PRODUCER_VERSION = "0.2.0"
 
 # ── Supported Azure resource surface ─────────────────────────────────────────
 _DATA_BEARING = {
@@ -360,11 +367,91 @@ def _preconditions(action: str, rtype: str, any_unknown: bool) -> List[Dict[str,
     return pc
 
 
+# ── State confidence, from Terraform's own refresh ───────────────────────────
+#
+# `terraform plan` refreshes by default: before computing a diff it reads live
+# reality for every managed resource. Anything that moved since the last apply
+# lands in a top-level `resource_drift` array, same shape as `resource_changes`.
+#
+# That array is a live-state observation sitting inside an offline artifact.
+# blastcheck did not perform the read — Terraform did — but the fact is no less
+# true for that, and it is the only dimension that invalidates all the others
+# when it goes wrong. A plan TRUSTS recorded state; drift is the proof that
+# trust was misplaced.
+#
+# What this cannot do, and must not pretend to: an empty `resource_drift` is
+# ambiguous. It means either "refresh ran and found nothing" or "refresh was
+# disabled with -refresh=false", and the plan JSON does not record which. So
+# absence never earns `state_matches_reality`; it stays `not_verified`. Nor does
+# refresh see resources that were created outside Terraform entirely — those are
+# not in state, so nothing refreshes them.
+
+def _drifted_fields(entry: Dict[str, Any], limit: int = 6) -> List[str]:
+    """Fields whose live value differed from the recorded state at refresh time.
+    In a drift entry `before` is the prior saved state and `after` is what
+    Terraform actually found."""
+    ch = (entry or {}).get("change") or {}
+    before, after = ch.get("before") or {}, ch.get("after") or {}
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return []
+    names = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    return names[:limit]
+
+
+def _state_confidence(drift: Optional[Dict[str, Any]], base: str,
+                      plan_ref: List[str]) -> Tuple[Dict[str, Any], List[dict]]:
+    if not drift:
+        return ({
+            "value": "not_verified", "verified_against_live": False, "confidence": "high",
+            "rationale": "This resource is absent from the plan's `resource_drift`, which means either "
+                         "that refresh found no drift or that refresh did not run (`-refresh=false`). "
+                         "The plan does not record which, so recorded state is treated as unverified "
+                         "rather than confirmed.",
+            "evidence": plan_ref,
+        }, [])
+
+    ev_id = f"{base}-drift"
+    fields = _drifted_fields(drift)
+    ch = (drift.get("change") or {})
+    detail = ", ".join(fields) if fields else "one or more attributes"
+    observation = f"recorded state and live reality differ on: {detail}"
+    # Where a scalar moved, name both values — it is the difference between
+    # "something drifted" and a reader understanding what happened.
+    b, a = ch.get("before") or {}, ch.get("after") or {}
+    if isinstance(b, dict) and isinstance(a, dict):
+        pairs = [f"{f}: recorded {b.get(f)!r} -> live {a.get(f)!r}" for f in fields
+                 if not isinstance(b.get(f), (dict, list)) and not isinstance(a.get(f), (dict, list))]
+        if pairs:
+            observation = "; ".join(pairs[:4])
+
+    evidence = [_ev(ev_id, f"resource_drift[] where address == {drift.get('address','')}",
+                    observation, source="live_state")]
+    return ({
+        "value": "drift_detected", "verified_against_live": True, "confidence": "high",
+        "rationale": f"Terraform's refresh found this resource had changed outside Terraform ({detail}). "
+                     "The plan below was computed against a description of this resource that no longer "
+                     "matched reality. blastcheck did not perform the live read; Terraform did, and "
+                     "recorded it in `resource_drift`.",
+        "evidence": plan_ref + [ev_id],
+    }, evidence)
+
+
 def _severity(dims: Dict[str, Any]) -> Tuple[str, str]:
     av = dims["availability_impact"]["value"]
     rv = dims["reversibility"]["value"]
     dd = dims["data_durability"]["value"]
     sec = dims["security_posture"]["value"]
+    sc = dims["state_confidence"]["value"]
+    # The plan is about to modify a resource that had already drifted out from
+    # under it. This is the single most dangerous shape in the whole format: the
+    # plan is internally consistent, reads as routine, and was computed against a
+    # description of the resource that had stopped being true. It outranks the
+    # other dimensions because it invalidates them — every verdict below was
+    # derived from the same stale state.
+    if sc == "drift_detected":
+        return "blocking", ("This change targets a resource whose recorded state did not match live reality "
+                            "at refresh time. The plan is internally consistent but was computed against a "
+                            "description of the resource that had already stopped being true.")
     # Catastrophic: permanent data loss, taking a live thing down, or widening exposure.
     if dd == "unrecoverable_loss" or av == "interrupts" or sec == "widened":
         return "blocking", "A dimension reports a catastrophic effect (data loss, interruption, or widened exposure)."
@@ -377,7 +464,8 @@ def _severity(dims: Dict[str, Any]) -> Tuple[str, str]:
     return "informational", "No dangerous or undetermined dimension found."
 
 
-def analyze_change(index: int, rc: Dict[str, Any]) -> Tuple[Dict[str, Any], List[dict]]:
+def analyze_change(index: int, rc: Dict[str, Any],
+                   drift: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], List[dict]]:
     addr = str(rc.get("address", ""))
     rtype = str(rc.get("type", ""))
     change = rc.get("change") or {}
@@ -403,6 +491,8 @@ def analyze_change(index: int, rc: Dict[str, Any]) -> Tuple[Dict[str, Any], List
 
     sec_dim, sec_ev = _security(action, rtype, before, after, after_unknown, after_sensitive, base)
     evidence.extend(sec_ev)
+    state_dim, state_ev = _state_confidence(drift, base, plan_ref)
+    evidence.extend(state_ev)
 
     dims = {
         "availability_impact": _availability(action, plan_ref),
@@ -410,12 +500,7 @@ def analyze_change(index: int, rc: Dict[str, Any]) -> Tuple[Dict[str, Any], List
         "data_durability": _data_durability(action, rtype, plan_ref),
         "security_posture": sec_dim,
         "cost_delta": _cost(action, rtype, before, after, after_unknown, after_sensitive, plan_ref),
-        "state_confidence": {
-            "value": "not_verified", "verified_against_live": False, "confidence": "high",
-            "rationale": "blastcheck ran plan-only; live state was not queried, so recorded state could not "
-                         "be checked against reality. Run with live-state enrichment to verify.",
-            "evidence": plan_ref,
-        },
+        "state_confidence": state_dim,
     }
     any_unknown = any(d.get("value") == "unknown" for d in
                       (dims["availability_impact"], dims["reversibility"],
@@ -442,7 +527,17 @@ def _verdict(changes: List[dict]) -> Dict[str, Any]:
             ("availability_impact", "reversibility", "data_durability", "security_posture", "cost_delta"))
     ) or any(p.get("status") == "unknown" for c in changes for p in c.get("preconditions", []))
 
-    if blocking:
+    drifted = [c["address"] for c in changes if c["state_confidence"]["value"] == "drift_detected"]
+
+    if drifted:
+        # Lead with drift when it is present. It is the finding a reader must not
+        # scroll past, and it explains why the rest of the verdict is untrustworthy.
+        decision = "blocked"
+        why = (f"{len(drifted)} change(s) target resources that had already drifted from recorded state at "
+               f"refresh time: {', '.join(drifted)}. The plan is internally consistent but was computed "
+               "against a description of these resources that had stopped being true. Every other verdict "
+               "for them was derived from that same stale state.")
+    elif blocking:
         decision, why = "blocked", f"{len(blocking)} change(s) report a catastrophic effect: {', '.join(blocking)}."
     elif unknown:
         decision, why = "unknown", (f"{len(unknown)} change(s) could not be certified without live state: "
@@ -461,6 +556,15 @@ def _verdict(changes: List[dict]) -> Dict[str, Any]:
 
 def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
     now = now or datetime.now(timezone.utc)
+
+    # Terraform's refresh findings, keyed by address. See _state_confidence().
+    raw_drift = plan.get("resource_drift")
+    drift_by_address: Dict[str, Any] = {}
+    if isinstance(raw_drift, list):
+        for d in raw_drift:
+            if isinstance(d, dict) and d.get("address"):
+                drift_by_address[str(d["address"])] = d
+
     supported, skipped = [], []
     for rc in plan.get("resource_changes", []):
         acts = set((rc.get("change") or {}).get("actions") or [])
@@ -476,7 +580,7 @@ def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None) -> Dict
 
     changes, evidence = [], []
     for i, rc in enumerate(supported):
-        ch, ev = analyze_change(i, rc)
+        ch, ev = analyze_change(i, rc, drift_by_address.get(str(rc.get("address", ""))))
         changes.append(ch)
         evidence.extend(ev)
 
@@ -499,7 +603,26 @@ def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None) -> Dict
         "changes": changes,
         "verdict": _verdict(changes),
     }
+    ext: Dict[str, Any] = {}
     if skipped:
         # Never silently drop unassessed changes — record them, per the format's spirit.
-        manifest["extensions"] = {"skipped": [str(r.get("address", "")) for r in skipped]}
+        ext["skipped"] = [str(r.get("address", "")) for r in skipped]
+
+    # Drift on resources this plan does NOT touch is not a change, so it gets no
+    # entry in changes[]. It is still a fact the reader should have: the estate
+    # has moved, and the next plan that does touch these will inherit the problem.
+    assessed = {str(r.get("address", "")) for r in supported}
+    elsewhere = sorted(a for a in drift_by_address if a not in assessed)
+    if elsewhere:
+        ext["drift_outside_this_plan"] = elsewhere
+
+    # Plan-level health. An errored plan is partial: actions recorded before the
+    # failure are real, but absence of a change proves nothing about the rest.
+    if plan.get("errored") is True:
+        ext["plan_errored"] = True
+    if plan.get("complete") is False:
+        ext["plan_incomplete"] = True
+
+    if ext:
+        manifest["extensions"] = ext
     return manifest

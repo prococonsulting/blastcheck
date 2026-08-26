@@ -11,7 +11,7 @@ terraform show -json plan.tfplan | blastcheck > manifest.json
 
 ## What it does, and what it deliberately doesn't
 
-blastcheck v0.1 is **offline and plan-only**. It reasons from the plan artifact alone. Wherever a verdict genuinely requires live cloud state — "is this disk attached to something serving traffic?", "does a backup exist?" — it emits `unknown` / `not_verified` **with a stated reason**, rather than guessing.
+blastcheck is **offline**: no credentials, no network, no hosted service. It reasons from the plan artifact alone. Wherever a verdict genuinely requires live cloud state — "is this disk attached to something serving traffic?", "does a backup exist?" — it emits `unknown` / `not_verified` **with a stated reason**, rather than guessing.
 
 A direct consequence, and the point of the format: **a plan-only run can never emit `safe`.** It never verified live state, so it says `caution`, `blocked`, or `unknown` — never `safe`. Certifying `safe` requires the live-state enrichment that a later version (or a paid consumer) layers on. blastcheck is honest about the ceiling of what a plan alone can prove.
 
@@ -20,7 +20,28 @@ What it derives from the plan alone is still substantial:
 - **Irreversibility** — e.g. a managed-disk *grow* is one-way (Azure can't shrink), visible in the plan diff.
 - **Widened exposure** — an inbound NSG rule opening `0.0.0.0/0` to a sensitive port; a storage account turning on public access or lowering TLS.
 - **Data-loss risk** — deleting a data-bearing resource flags the primary copy as removed and recoverability as *unverified*, not *safe*.
-- **Cost direction**, **action semantics**, and a `not_verified` state-confidence stamp on every change.
+- **Cost direction** and **action semantics**.
+- **Drift** — see below. This is the one place blastcheck reaches a real state determination rather than an `unknown`.
+
+## Drift, without asking you for credentials
+
+`terraform plan` refreshes by default: before computing a diff it reads live reality for every managed resource, and records anything that moved in a top-level `resource_drift` array. That is a live-state observation already sitting inside the offline artifact. blastcheck did not perform the read — Terraform did — but the fact is no less true for it.
+
+A resource appearing in **both** `resource_drift` and `resource_changes` is the most dangerous shape blastcheck can find, and it is graded `blocking`:
+
+```
+azurerm_managed_disk.sql_data   severity: blocking
+  state_confidence: drift_detected  (recorded 512 -> live 1024)
+```
+
+The plan is internally consistent. It reads as routine. It was computed against a description of that resource which had already stopped being true, and every other verdict for it was derived from that same stale state.
+
+Two limits, stated rather than papered over:
+
+- An **empty** `resource_drift` is ambiguous. It means either "refresh found nothing" or "refresh did not run" (`-refresh=false`), and the plan does not record which. So absence never earns `state_matches_reality`; it stays `not_verified`.
+- Refresh only sees resources Terraform manages. Anything created outside Terraform is not in state, so nothing refreshes it. Shadow-IT discovery needs a direct cloud query and is out of scope here.
+
+Drift on a resource this plan does not touch is recorded under `extensions.drift_outside_this_plan` rather than invented into a change.
 
 blastcheck is a **producer, not a gate**. It emits the manifest and exits `0`; turning that into pass/fail is a separate policy layer (a CI gate). Exit codes reflect execution, not the verdict.
 

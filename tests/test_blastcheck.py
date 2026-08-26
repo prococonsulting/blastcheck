@@ -202,3 +202,73 @@ def test_only_unsupported_changes_raises():
     ]}))
     with pytest.raises(PlanError):
         build_manifest(plan, now=NOW)
+
+
+# ── Drift, read from Terraform's own refresh ─────────────────────────────────
+
+def test_drift_on_a_planned_resource_blocks():
+    """The outage shape. `terraform plan` refreshes by default and records what
+    it found in `resource_drift`. A resource in BOTH resource_drift and
+    resource_changes means the plan is about to modify something that had
+    already moved out from under it — internally consistent, reads as routine,
+    and computed against a description that stopped being true."""
+    m = _manifest("drift-on-planned-resource.json")
+    ch = _change(m, "azurerm_managed_disk.sql_data")
+    assert ch["state_confidence"]["value"] == "drift_detected"
+    assert ch["state_confidence"]["verified_against_live"] is True
+    assert ch["state_confidence"]["confidence"] == "high"
+    assert ch["severity"] == "blocking"
+    assert m["verdict"]["decision"] == "blocked"
+    assert "drifted" in m["verdict"]["rationale"]
+
+
+def test_drift_evidence_names_the_values_and_its_origin():
+    """A reader must be able to see WHAT moved, and know the live read was
+    Terraform's, not blastcheck's."""
+    m = _manifest("drift-on-planned-resource.json")
+    live = [e for e in m["evidence"] if e["source"] == "live_state"]
+    assert len(live) == 1
+    assert "512" in live[0]["observation"] and "1024" in live[0]["observation"]
+    assert "resource_drift" in live[0]["query"]
+    # blastcheck itself still never queried anything.
+    assert m["producer"]["access"]["live_state"] == "not_attempted"
+
+
+def test_undrifted_resource_in_a_drifted_plan_stays_not_verified():
+    """Drift on one resource says nothing about another. Absence of a drift
+    entry is ambiguous — refresh may have found nothing, or may not have run."""
+    m = _manifest("drift-on-planned-resource.json")
+    ch = _change(m, "azurerm_network_security_group.clean")
+    assert ch["state_confidence"]["value"] == "not_verified"
+    assert ch["severity"] == "informational"
+
+
+def test_drift_outside_the_plan_is_recorded_not_dropped():
+    """A drifted resource this plan does not touch gets no changes[] entry —
+    it is not a change — but the reader should still learn the estate moved."""
+    m = _manifest("drift-on-planned-resource.json")
+    assert m["extensions"]["drift_outside_this_plan"] == ["azurerm_storage_account.untouched"]
+    assert all(c["address"] != "azurerm_storage_account.untouched" for c in m["changes"])
+
+
+def test_plans_without_drift_data_are_unchanged():
+    """Every pre-existing fixture has no resource_drift key at all. None of them
+    may start claiming a state determination they cannot support."""
+    for fixture in FIXTURES.glob("*.json"):
+        if fixture.name == "drift-on-planned-resource.json":
+            continue
+        m = build_manifest(load_plan(fixture.read_text()), now=NOW)
+        for c in m["changes"]:
+            assert c["state_confidence"]["value"] == "not_verified"
+
+
+def test_errored_and_incomplete_plans_are_flagged():
+    plan = load_plan(json.dumps({
+        "format_version": "1.2", "errored": True, "complete": False,
+        "resource_changes": [
+            {"address": "azurerm_managed_disk.d", "type": "azurerm_managed_disk", "name": "d",
+             "change": {"actions": ["delete"], "before": {"disk_size_gb": 100}, "after": None}}
+        ]}))
+    m = build_manifest(plan, now=NOW)
+    assert m["extensions"]["plan_errored"] is True
+    assert m["extensions"]["plan_incomplete"] is True
