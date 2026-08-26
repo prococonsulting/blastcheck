@@ -1,6 +1,6 @@
 # blastcheck
 
-**blastcheck** reads a `terraform show -json` plan and emits an **Impact Manifest** (the sibling `impact-manifest` spec repo) — a machine-readable change-safety assertion. It is the reference producer of that open format.
+**blastcheck** reads a `terraform show -json` plan and emits an **[Impact Manifest](https://github.com/prococonsulting/impact-manifest)** — a machine-readable change-safety assertion. It is the reference producer of that open format.
 
 ```
 terraform plan -out plan.tfplan
@@ -74,7 +74,7 @@ pytest
 
 ## Relationship to the spec
 
-blastcheck implements the Impact Manifest specification (the sibling `impact-manifest` repo) and vendors a pinned copy of its schema at `blastcheck/schema/`, which ships inside the wheel. The format is open and vendor-neutral; blastcheck is *a* reference implementation of it, not its owner.
+blastcheck implements the [Impact Manifest specification](https://github.com/prococonsulting/impact-manifest) and vendors a pinned copy of its schema at `blastcheck/schema/`, which ships inside the wheel. The format is open and vendor-neutral; blastcheck is *a* reference implementation of it, not its owner.
 
 ## Status
 
