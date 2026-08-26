@@ -1,0 +1,14 @@
+blastcheck
+Copyright 2026 Kevin Proffitt
+
+This product includes software developed by Kevin Proffitt
+(https://prococonsulting.com).
+
+blastcheck is the reference producer of the Impact Manifest format, an open
+specification published separately at:
+
+    https://github.com/prococonsulting/impact-manifest
+
+The Impact Manifest specification is vendor-neutral and is not owned by this
+implementation. Other producers and consumers of the format are expected, and
+implementing it requires no permission from this project.
