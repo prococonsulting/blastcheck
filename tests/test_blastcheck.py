@@ -170,10 +170,18 @@ def test_state_confidence_always_not_verified_offline():
     assert _change(m, "azurerm_managed_disk.sql")["state_confidence"]["value"] == "not_verified"
 
 
-def test_unsupported_changes_recorded_not_dropped():
+def test_every_change_is_assessed_even_without_a_precise_rule():
+    """Nothing is skipped for being an unfamiliar type any more. A real 55-change
+    AWS plan used to produce 'no supported resource changes found' with every
+    test in this file passing, which is the failure mode this replaced."""
     m = _manifest("mixed-with-unsupported.json")
-    assert [c["address"] for c in m["changes"]] == ["azurerm_managed_disk.data"]
-    assert m["extensions"]["skipped"] == ["azurerm_resource_group.rg"]
+    addrs = sorted(c["address"] for c in m["changes"])
+    assert addrs == ["azurerm_managed_disk.data", "azurerm_resource_group.rg"]
+    # The manifest still says HOW each verdict was reached.
+    depth = m["extensions"]["assessment"]
+    assert depth["azurerm_managed_disk.data"] == "precise"
+    assert depth["azurerm_resource_group.rg"] == "structural"
+    assert "skipped" not in m.get("extensions", {})
 
 
 def test_replace_actions_carried_verbatim():
@@ -195,10 +203,23 @@ def test_missing_resource_changes_raises():
         load_plan(json.dumps({"format_version": "1.2"}))
 
 
-def test_only_unsupported_changes_raises():
+def test_a_plan_of_only_unfamiliar_types_still_produces_a_manifest():
+    """The old behaviour was to raise. That made blastcheck useless on any plan
+    outside its narrow type list, which is most real plans."""
     plan = load_plan(json.dumps({"resource_changes": [
         {"address": "azurerm_resource_group.a", "type": "azurerm_resource_group",
          "name": "a", "change": {"actions": ["create"], "before": None, "after": {}}}
+    ]}))
+    m = build_manifest(plan, now=NOW)
+    assert len(m["changes"]) == 1
+    assert not sorted(VALIDATOR.iter_errors(m), key=str)
+
+
+def test_a_plan_with_nothing_mutating_still_raises():
+    """A plan of pure no-ops and data reads genuinely has nothing to assess."""
+    plan = load_plan(json.dumps({"resource_changes": [
+        {"address": "azurerm_resource_group.a", "type": "azurerm_resource_group",
+         "name": "a", "change": {"actions": ["no-op"], "before": {}, "after": {}}}
     ]}))
     with pytest.raises(PlanError):
         build_manifest(plan, now=NOW)
@@ -272,3 +293,69 @@ def test_errored_and_incomplete_plans_are_flagged():
     m = build_manifest(plan, now=NOW)
     assert m["extensions"]["plan_errored"] is True
     assert m["extensions"]["plan_incomplete"] is True
+
+
+# ── Layer 0 and Layer 1: providers with no precise rules ─────────────────────
+
+def test_aws_and_gcp_are_assessed_without_provider_rules():
+    """blastcheck has no AWS or GCP rules at all. It must still produce useful
+    output, because 'no supported resource changes found' on a real plan is a
+    useless answer however correct the tool is about plans it does understand."""
+    m = _manifest("aws-no-precise-rules.json")
+    assert len(m["changes"]) == 8
+    assert all(v != "precise" for v in m["extensions"]["assessment"].values())
+    assert not sorted(VALIDATOR.iter_errors(m), key=str)
+
+
+def test_heuristic_findings_are_marked_as_guesses():
+    """A pattern match must be visibly a pattern match: low confidence, evidence
+    tagged `heuristic`, and severity `caution` rather than `blocking`. Grading a
+    guess as blocking is how a tool teaches people to ignore it."""
+    m = _manifest("aws-no-precise-rules.json")
+    ch = _change(m, "aws_db_instance.prod")
+    sp = ch["security_posture"]
+    assert sp["value"] == "widened"
+    assert sp["confidence"] == "low"
+    assert ch["severity"] == "caution"
+    details = " ".join(c["detail"] for c in sp["concerns"])
+    assert "publicly_accessible" in details
+    assert "storage_encrypted" in details
+    assert "skip_final_snapshot" in details
+    assert any(e["source"] == "heuristic" for e in m["evidence"])
+
+
+def test_public_acl_and_force_destroy_are_caught_generically():
+    m = _manifest("aws-no-precise-rules.json")
+    details = " ".join(c["detail"] for c in
+                       _change(m, "aws_s3_bucket.public_data")["security_posture"]["concerns"])
+    assert "public-read" in details and "force_destroy" in details
+
+
+def test_inbound_open_cidr_flagged_outbound_and_routes_are_not():
+    """The single most important precision rule in the heuristic layer. Egress to
+    0.0.0.0/0 and a default route ARE 0.0.0.0/0 by definition; flagging them
+    fires on nearly every plan ever written and destroys trust in the output."""
+    m = _manifest("aws-no-precise-rules.json")
+    assert _change(m, "aws_security_group_rule.ssh_in")["security_posture"]["value"] == "widened"
+    assert _change(m, "aws_security_group_rule.all_out")["security_posture"]["value"] != "widened"
+    assert _change(m, "aws_route.default")["security_posture"]["value"] != "widened"
+
+
+def test_data_bearing_inferred_from_type_name():
+    """`aws_dynamodb_table` holds data; `aws_route_table` does not, despite both
+    ending in _table. An unanchored pattern gets this wrong."""
+    m = _manifest("aws-no-precise-rules.json")
+    dynamo = _change(m, "aws_dynamodb_table.sessions")["data_durability"]
+    assert dynamo["value"] == "unknown"
+    assert "at_risk" in dynamo
+    rtb = _change(m, "aws_route_table.public")["data_durability"]
+    assert rtb["value"] == "unknown"      # a delete is never assumed benign
+    assert "at_risk" not in rtb           # but it is not claimed to hold data
+
+
+def test_deletion_protection_removal_is_caught_on_a_third_provider():
+    """No Google rules exist either. The pattern is the attribute name."""
+    m = _manifest("aws-no-precise-rules.json")
+    details = " ".join(c["detail"] for c in
+                       _change(m, "google_sql_database_instance.main")["security_posture"]["concerns"])
+    assert "deletion_protection" in details

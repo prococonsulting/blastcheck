@@ -15,9 +15,20 @@ offline artifact. blastcheck did not perform the read, but it reads the result �
 so drift IS determined, and a plan modifying an already-drifted resource is the
 single highest-severity finding this tool produces.
 
-Scope (narrow on purpose): Azure managed disks, virtual machines, network
-security groups (+ rules), storage accounts, and SQL databases. Anything else in
-the plan is recorded under `extensions.skipped`, never silently dropped.
+Coverage is layered, and EVERY change is assessed:
+
+  Layer 0  structural, works on any provider ever written. Action semantics
+           (a delete is a delete), action_reason, replace_paths, drift,
+           unreadable fields, plan-level errored/complete.
+  Layer 1  provider-agnostic heuristics over resource-type names and attribute
+           names and values. Tagged `source: heuristic`, LOW confidence, and
+           graded `caution` rather than `blocking` — a guess reported as a guess.
+  Layer 2  precise rules for types this tool understands exactly. Azure managed
+           disks, VMs, NSGs (+ rules), storage accounts, SQL databases today.
+           Where a precise rule exists it wins; a guess never overrides it.
+
+Nothing is skipped for being unfamiliar. `extensions.assessment` records which
+layer produced each verdict.
 
 The reasoning is commented, not the syntax — every verdict rule is one a human
 should be able to defend out loud.
@@ -26,13 +37,19 @@ should be able to defend out loud.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 SCHEMA_VERSION = "0.1.0"
-PRODUCER_VERSION = "0.2.0"
+PRODUCER_VERSION = "0.3.0"
 
-# ── Supported Azure resource surface ─────────────────────────────────────────
+# Plan JSON format versions this tool has been exercised against. Terraform 0.12
+# emitted "0.1"; 1.x emits "1.x". Reading an unrecognised major without saying so
+# is the same class of mistake as reading an unreadable field as absent.
+_KNOWN_FORMAT_MAJORS = {"0", "1"}
+
+# ── Layer 2: precise Azure rules ─────────────────────────────────────────────
 _DATA_BEARING = {
     "azurerm_managed_disk",
     "azurerm_storage_account",
@@ -48,12 +65,64 @@ _VM_TYPES = {
     "azurerm_windows_virtual_machine",
     "azurerm_virtual_machine",
 }
-SUPPORTED = _DATA_BEARING | _STATELESS | _VM_TYPES
+PRECISE = _DATA_BEARING | _STATELESS | _VM_TYPES
+SUPPORTED = PRECISE  # retained name; every change is now assessed, see below
 
 # Sources that count as "the whole internet" for an inbound-allow rule.
 _OPEN_SOURCES = {"*", "0.0.0.0/0", "internet", "any"}
 # Ports whose exposure to the internet is a red flag on its own.
 _SENSITIVE_PORTS = {"22", "3389", "*"}
+
+# ── Layer 1: provider-agnostic heuristics ────────────────────────────────────
+#
+# The sets above are Layer 2: precise rules for types this tool understands
+# exactly. They will never cover Terraform's provider ecosystem, and a tool that
+# answers "no supported resource changes found" on a real plan is useless no
+# matter how correct it is about the plans it does understand. A real 55-change
+# AWS plan produced exactly that, with every unit test passing.
+#
+# So every change is assessed now. Where a precise rule exists it wins. Where
+# none does, these patterns run against the resource TYPE NAME and the ATTRIBUTE
+# names and values, which is all a plan carries and is provider-independent.
+#
+# Findings from this layer are tagged `source: heuristic` and carry LOW
+# confidence, because that is what they are: an inference from a naming
+# convention. The format has always had a `heuristic` evidence source and a
+# confidence orthogonal to value, precisely so a guess can be reported as a
+# guess rather than suppressed or dressed up as a determination.
+
+# Type-name fragments suggesting a resource holds data. Word-boundary anchored:
+# unanchored "table" matches `aws_route_table`, which holds nothing.
+_DATA_HINTS = re.compile(
+    r"(?:^|_)(disk|disks|volume|volumes|database|databases|db|rds|bucket|buckets|"
+    r"blob|blobs|filesystem|efs|snapshot|snapshots|backup|backups|vault|"
+    r"secret|secrets|registry|repository|repositories|dynamodb|documentdb|"
+    r"elasticache|redis|cosmosdb|bigtable|datastore|warehouse|archive|"
+    r"queue|topic|stream|statefile)(?:$|_)", re.I)
+# Types matching a hint that demonstrably hold nothing. Routing, grouping and
+# parameter objects are configuration, not storage.
+_DATA_ANTIHINTS = re.compile(
+    r"(?:^|_)(route_table|routing_table|subnet_group|option_group|parameter_group|"
+    r"security_group|placement_group|log_group|resource_group|instance_profile|"
+    r"instance_type|policy|acl|association|attachment|rule|role|binding|"
+    r"membership|assignment|link|peering|endpoint|gateway)(?:$|_)", re.I)
+
+_OPEN_CIDRS = ("0.0.0.0/0", "::/0")
+# Attributes where reaching the whole internet is the normal, correct value and
+# flagging it is noise. Outbound rules are open by default almost everywhere,
+# and a default route is *defined* as 0.0.0.0/0. A heuristic that fires on every
+# egress rule and every route table teaches people to skip the output, which
+# costs more than the findings it buys.
+_OPEN_CIDR_EXPECTED = re.compile(
+    r"egress|outbound|destination_cidr|destination_prefix|nat_|^route$|_route$", re.I)
+# Attribute names whose value flipping ON widens exposure.
+_PUBLIC_ATTR = re.compile(r"public|anonymous|internet_facing|open_access", re.I)
+# Attribute names whose value flipping OFF removes a protection.
+_PROTECT_ATTR = re.compile(
+    r"encrypt|kms|deletion_protection|purge_protection|prevent_destroy|"
+    r"versioning|mfa_delete|backup_retention|require_ssl|force_ssl|https_only", re.I)
+# Attribute names whose value flipping ON removes a protection (inverted sense).
+_INVERTED_PROTECT_ATTR = re.compile(r"force_destroy|skip_final_snapshot|allow_forwarded", re.I)
 
 
 class PlanError(ValueError):
@@ -123,6 +192,74 @@ def _unknown_fields(unknown: Dict[str, Any]) -> List[str]:
     """Field names the plan genuinely could not resolve. Empty containers are
     filtered out — Terraform emits `{}`/`[]` for structures it *can* resolve."""
     return sorted(k for k, v in (unknown or {}).items() if v not in (False, None, {}, [], ""))
+
+
+def _looks_data_bearing(rtype: str) -> bool:
+    """Layer 1 guess at whether a resource type holds data, from its name."""
+    if rtype in _DATA_BEARING:
+        return True
+    if rtype in _STATELESS or _DATA_ANTIHINTS.search(rtype or ""):
+        return False
+    return bool(_DATA_HINTS.search(rtype or ""))
+
+
+def _contains_open_cidr(value: Any) -> bool:
+    """Does any string anywhere under this value name the whole internet?"""
+    if isinstance(value, str):
+        return value.strip() in _OPEN_CIDRS
+    if isinstance(value, dict):
+        return any(_contains_open_cidr(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_open_cidr(v) for v in value)
+    return False
+
+
+def _heuristic_exposure(action: str, before: dict, after: dict) -> List[dict]:
+    """Layer 1 exposure findings, from attribute names and values alone.
+
+    Every rule here compares against the BEFORE state where one exists, so that
+    a pre-existing condition is not reported as something this change does. A
+    plan that leaves a bucket exactly as public as it already was has not
+    widened anything, and saying otherwise trains people to ignore the output."""
+    if action not in ("create", "update", "replace") or not isinstance(after, dict):
+        return []
+    before = before if isinstance(before, dict) else {}
+    out: List[dict] = []
+
+    # Some resources carry their direction in an attribute rather than in the
+    # attribute name (`aws_security_group_rule` has type = ingress | egress).
+    # An outbound rule reaching the internet is the normal case everywhere.
+    direction = ""
+    for k in ("type", "direction", "traffic_direction"):
+        v = after.get(k)
+        if isinstance(v, str):
+            direction = v.lower()
+            break
+    outbound = direction in ("egress", "outbound", "out")
+
+    for key, val in after.items():
+        was = before.get(key)
+        if val == was:
+            continue  # unchanged by this plan
+        if _contains_open_cidr(val) and not _contains_open_cidr(was) \
+                and not outbound and not _OPEN_CIDR_EXPECTED.search(key):
+            out.append({"kind": "exposure",
+                        "detail": f"`{key}` now reaches the whole internet (0.0.0.0/0 or ::/0)"})
+        elif _PUBLIC_ATTR.search(key) and val is True and was is not True:
+            out.append({"kind": "exposure", "detail": f"`{key}` set to true"})
+        elif _PUBLIC_ATTR.search(key) and isinstance(val, str) and "public" in val.lower() \
+                and not (isinstance(was, str) and "public" in was.lower()):
+            out.append({"kind": "exposure", "detail": f"`{key}` set to {val!r}"})
+        elif isinstance(val, str) and "public" in val.lower() and re.search(r"acl|access", key, re.I) \
+                and not (isinstance(was, str) and "public" in was.lower()):
+            out.append({"kind": "exposure", "detail": f"`{key}` set to {val!r}"})
+        elif _PROTECT_ATTR.search(key) and val is False and was is not False:
+            out.append({"kind": "identity", "detail": f"`{key}` disabled"})
+        elif _INVERTED_PROTECT_ATTR.search(key) and val is True and was is not True:
+            out.append({"kind": "identity", "detail": f"`{key}` enabled, removing a safeguard"})
+    # A create has no before-state, so protections that are simply absent from a
+    # new resource read as "off". Report them, but only the affirmative ones.
+    return out[:8]
 
 
 # ── Per-dimension analyzers (plan-only) ──────────────────────────────────────
@@ -200,6 +337,20 @@ def _data_durability(action: str, rtype: str, ev: List[str]) -> Dict[str, Any]:
         return {"value": "unknown", "confidence": "low",
                 "rationale": "Data durability depends on whether attached disks are retained or deleted, "
                              "which requires live/config detail not resolved here.", "evidence": ev}
+    # Layer 1: no precise rule for this type, so guess from the name and say so.
+    if action in ("delete", "replace") and _looks_data_bearing(rtype):
+        return {"value": "unknown", "at_risk": [f"data possibly held by {rtype} (type not precisely known)"],
+                "confidence": "low",
+                "rationale": f"`{rtype}` has no precise rule in this version. Its name suggests it holds "
+                             "data, and it is being destroyed, so durability is treated as undetermined "
+                             "rather than assumed safe. This is an inference from the type name.",
+                "evidence": ev}
+    if action in ("delete", "replace"):
+        return {"value": "unknown", "confidence": "low",
+                "rationale": f"`{rtype}` is being destroyed and has no precise rule in this version. "
+                             "Nothing in the plan establishes that it holds no data, so this is "
+                             "undetermined rather than benign.",
+                "evidence": ev}
     return {"value": "no_data_loss", "confidence": "medium",
             "rationale": "This change does not remove a data-bearing resource.", "evidence": ev}
 
@@ -315,6 +466,23 @@ def _security(action: str, rtype: str, before: dict, after: dict,
         return ({"value": "widened", "concerns": concerns, "confidence": "high",
                  "rationale": "The plan's after-state widens exposure or weakens a control (see concerns).",
                  "evidence": [base + "-plan", ev_id]}, extra_ev)
+
+    # Layer 1. Only reached when no precise rule fired, so a precise `unchanged`
+    # is never overridden by a guess. Confidence is low and the evidence is
+    # tagged `heuristic`: this is pattern matching on attribute names, and a
+    # reader is entitled to know that is all it is.
+    if rtype not in PRECISE:
+        guesses = _heuristic_exposure(action, before, after)
+        if guesses:
+            h_id = f"{base}-heur"
+            extra_ev.append(_ev(h_id, "change.after vs change.before: attribute name and value patterns",
+                                 "; ".join(g["detail"] for g in guesses), source="heuristic"))
+            return ({"value": "widened", "concerns": guesses, "confidence": "low",
+                     "rationale": f"`{rtype}` has no precise rule in this version. Pattern matching on "
+                                  "attribute names and values suggests this change widens exposure or "
+                                  "removes a protection. Treat as a lead, not a determination.",
+                     "evidence": [base + "-plan", h_id]}, extra_ev)
+
     if unreadable:
         extra_ev.append(_ev(ev_id, "change.after_unknown / change.after_sensitive",
                              "; ".join(unreadable)))
@@ -452,9 +620,17 @@ def _severity(dims: Dict[str, Any]) -> Tuple[str, str]:
         return "blocking", ("This change targets a resource whose recorded state did not match live reality "
                             "at refresh time. The plan is internally consistent but was computed against a "
                             "description of the resource that had already stopped being true.")
-    # Catastrophic: permanent data loss, taking a live thing down, or widening exposure.
-    if dd == "unrecoverable_loss" or av == "interrupts" or sec == "widened":
+    # Catastrophic: permanent data loss, taking a live thing down, or widening
+    # exposure — but only where the finding was actually determined. A Layer 1
+    # pattern match is a lead, and grading leads `blocking` is how a tool trains
+    # people to ignore it. A low-confidence widening is `caution`: visible,
+    # not alarming.
+    sec_confident = dims["security_posture"].get("confidence") in ("high", "medium")
+    if dd == "unrecoverable_loss" or av == "interrupts" or (sec == "widened" and sec_confident):
         return "blocking", "A dimension reports a catastrophic effect (data loss, interruption, or widened exposure)."
+    if sec == "widened":
+        return "caution", ("Pattern matching suggests this change widens exposure or removes a protection, "
+                           "but no precise rule covers this resource type. Worth a look; not a determination.")
     # Safety-critical dimension could not be determined -> not certifiable.
     if "unknown" in (av, rv, dd, sec):
         return "unknown", "A safety-critical dimension could not be determined without live state."
@@ -485,9 +661,21 @@ def analyze_change(index: int, rc: Dict[str, Any],
     base = f"e{index}"
     plan_ref = [f"{base}-plan"]
     unresolved_now = _unknown_fields(after_unknown)
-    evidence = [_ev(f"{base}-plan", f"resource_changes[] where address == {addr}",
-                    f"actions={actions_raw}; type={rtype}"
-                    + (f"; not known until apply: {', '.join(unresolved_now[:8])}" if unresolved_now else ""))]
+
+    # Layer 0. Terraform states, in every provider, WHY it chose this action and
+    # WHICH attribute forced a replacement. That is free, structural signal and
+    # blastcheck was throwing it away.
+    obs = f"actions={actions_raw}; type={rtype}"
+    reason = rc.get("action_reason")
+    if reason:
+        obs += f"; action_reason={reason}"
+    paths = change.get("replace_paths")
+    if isinstance(paths, list) and paths:
+        pretty = [".".join(str(p) for p in seg) if isinstance(seg, list) else str(seg) for seg in paths]
+        obs += f"; replacement forced by: {', '.join(pretty[:6])}"
+    if unresolved_now:
+        obs += f"; not known until apply: {', '.join(unresolved_now[:8])}"
+    evidence = [_ev(f"{base}-plan", f"resource_changes[] where address == {addr}", obs)]
 
     sec_dim, sec_ev = _security(action, rtype, before, after, after_unknown, after_sensitive, base)
     evidence.extend(sec_ev)
@@ -565,17 +753,22 @@ def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None) -> Dict
             if isinstance(d, dict) and d.get("address"):
                 drift_by_address[str(d["address"])] = d
 
-    supported, skipped = [], []
+    # Every mutating change is assessed. Nothing is skipped for being an
+    # unfamiliar type: Layer 0 rules (action semantics, drift, unreadable fields)
+    # apply to any provider, and Layer 1 patterns apply to any attribute names.
+    # A tool that answers "no supported resource changes found" on a real plan
+    # is useless however correct it is about the plans it does understand.
+    supported = []
     for rc in plan.get("resource_changes", []):
         acts = set((rc.get("change") or {}).get("actions") or [])
         if acts <= {"no-op", "read"}:
             continue  # nothing is mutated
-        (supported if rc.get("type") in SUPPORTED else skipped).append(rc)
+        supported.append(rc)
 
     if not supported:
         raise PlanError(
-            "no supported resource changes found. Supported (v0.1): Azure managed disks, virtual machines, "
-            "network security groups (+ rules), storage accounts, SQL databases."
+            "no mutating resource changes found in this plan — every entry is a no-op or a data-source "
+            "read, so there is nothing to assess."
         )
 
     changes, evidence = [], []
@@ -604,9 +797,29 @@ def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None) -> Dict
         "verdict": _verdict(changes),
     }
     ext: Dict[str, Any] = {}
-    if skipped:
-        # Never silently drop unassessed changes — record them, per the format's spirit.
-        ext["skipped"] = [str(r.get("address", "")) for r in skipped]
+
+    # How each verdict was reached. `change` is strict in the schema and rightly
+    # so, but a reader must be able to tell a precise rule from a pattern match
+    # without inferring it from the confidence field.
+    depth = {}
+    for r in supported:
+        addr, rtype = str(r.get("address", "")), str(r.get("type", ""))
+        depth[addr] = "precise" if rtype in PRECISE else (
+            "heuristic" if _looks_data_bearing(rtype) or _DATA_HINTS.search(rtype) else "structural")
+    ext["assessment"] = depth
+    n_precise = sum(1 for v in depth.values() if v == "precise")
+    if n_precise < len(depth):
+        ext["assessment_note"] = (
+            f"{n_precise} of {len(depth)} changes matched a precise rule for their resource type. The rest "
+            "were assessed from action semantics, drift, unreadable fields, and attribute-name patterns, "
+            "which are provider-independent but less certain. Their confidence values say so.")
+
+    # Plan JSON format. An unrecognised major may be shaped differently than
+    # anything this parser has seen, and reading it anyway without saying so is
+    # the same mistake as reading an unreadable field as absent.
+    fmt = str(plan.get("format_version") or "")
+    if fmt and fmt.split(".")[0] not in _KNOWN_FORMAT_MAJORS:
+        ext["unrecognised_plan_format"] = fmt
 
     # Drift on resources this plan does NOT touch is not a change, so it gets no
     # entry in changes[]. It is still a fact the reader should have: the estate

@@ -45,9 +45,25 @@ Drift on a resource this plan does not touch is recorded under `extensions.drift
 
 blastcheck is a **producer, not a gate**. It emits the manifest and exits `0`; turning that into pass/fail is a separate policy layer (a CI gate). Exit codes reflect execution, not the verdict.
 
-## Scope (v0.1, intentionally narrow)
+## Coverage: every provider, in three layers
 
-Azure: managed disks, virtual machines, network security groups (+ rules), storage accounts, SQL databases. Anything else in the plan is recorded under `extensions.skipped` — never silently dropped. The narrow surface is a choice: the job of this version is to exercise the Impact Manifest schema against real plans and find its shape errors, not to be a finished product.
+Every change in a plan is assessed. Nothing is skipped for being an unfamiliar type.
+
+| Layer | Applies to | Confidence |
+|---|---|---|
+| **0 — structural** | any provider ever written | high |
+| **1 — heuristic** | any provider, by name and value patterns | low, tagged `heuristic` |
+| **2 — precise** | types with an exact rule | high |
+
+**Layer 0** reads what Terraform states regardless of provider: action semantics (a `delete` is a delete, a `replace` implies a destroy), `action_reason`, `replace_paths`, `resource_drift`, unreadable fields, and plan-level `errored` / `complete`.
+
+**Layer 1** matches on resource-type names (`*_disk`, `*_bucket`, `*_database`) and attribute names and values (`publicly_accessible`, `storage_encrypted: false`, `acl: public-read`, an inbound `0.0.0.0/0`). On a real 55-change AWS plan, with zero AWS-specific code, this finds a publicly accessible unencrypted RDS instance, a public-read S3 bucket, and a security group open to the internet.
+
+These findings are graded **`caution`, never `blocking`**, carry `confidence: low`, and their evidence is tagged `source: heuristic`. They are leads, not determinations, and saying so is the difference between a tool people read and a tool people mute. In the same spirit, an open **egress** rule and a default route are not flagged: they are `0.0.0.0/0` by definition, and firing on them would trip on nearly every plan ever written.
+
+**Layer 2** is the precise set: Azure managed disks, virtual machines, network security groups (+ rules), storage accounts, SQL databases. Where a precise rule exists it wins, and a heuristic never overrides it.
+
+`extensions.assessment` records which layer produced each verdict.
 
 ## Install & use
 
@@ -99,7 +115,7 @@ blastcheck implements the [Impact Manifest specification](https://github.com/pro
 
 ## Status
 
-v0.2 — draft, narrow, and evolving alongside the spec (which does not freeze at 1.0 until this tool has run against real Terraform plans).
+v0.3 — draft, and evolving alongside the spec (which does not freeze at 1.0 until this tool has run against real Terraform plans).
 
 ## Contributing and contact
 
