@@ -107,8 +107,17 @@ terraform show -json tfplan | blastcheck &gt; manifest.json</code></pre>
     <tr><td><code>reversibility</code></td><td>An Azure managed disk grow is one-way. Azure cannot shrink a disk.</td></tr>
     <tr><td><code>security_posture</code></td><td>An inbound rule opening <code>0.0.0.0/0</code> to 22 or 3389; a storage account turning on public access, lowering TLS, or flipping its firewall to default-allow.</td></tr>
     <tr><td><code>data_durability</code></td><td>A delete removes the primary copy of a data-bearing resource, and recoverability is <em>unverified</em> rather than assumed.</td></tr>
-    <tr><td><code>state_confidence</code></td><td>Always <code>not_verified</code> offline. A plan trusts recorded state; nothing here checked that trust.</td></tr>
+    <tr><td><code>state_confidence</code></td><td><code>drift_detected</code> when Terraform's own refresh found the resource had moved. Otherwise <code>not_verified</code> — see below.</td></tr>
   </table>
+
+  <h2>Drift, without asking you for credentials</h2>
+  <p><code>terraform plan</code> refreshes by default: before computing a diff it reads live reality for every managed resource and records anything that moved in a top-level <code>resource_drift</code> array. That is a live-state observation already sitting inside an offline artifact. blastcheck did not perform the read. Terraform did. The fact is no less true for it.</p>
+  <p>A resource appearing in <strong>both</strong> <code>resource_drift</code> and <code>resource_changes</code> is the most dangerous shape this tool can find, and it is graded <code>blocking</code>:</p>
+<pre><code>azurerm_managed_disk.sql_data          severity: blocking
+  state_confidence: drift_detected     (recorded 512 -&gt; live 1024)
+verdict: blocked</code></pre>
+  <p>The plan is internally consistent. It reads as routine. It was computed against a description of that resource which had already stopped being true, and every other verdict for it was derived from the same stale state. <a href="/the-plan-was-right/">That is the outage this exists for.</a></p>
+  <p>Two limits, stated rather than papered over. An <em>empty</em> <code>resource_drift</code> is ambiguous — it means either refresh found nothing or refresh did not run (<code>-refresh=false</code>), and the plan does not record which, so absence never earns <code>state_matches_reality</code>. And refresh only sees resources Terraform manages; anything created outside Terraform is not in state, so nothing refreshes it.</p>
 
   <h2>Why it never says <code>safe</code></h2>
   <p>blastcheck is offline by design. It never queries live cloud state, so it is not entitled to certify that a change is safe — it can only report <code>caution</code>, <code>blocked</code>, or <code>unknown</code>. That is not a limitation being apologised for. A tool that says <code>safe</code> when it means <em>I found no problem</em> converts an absence of information into a green light and puts someone's name on it.</p>
@@ -124,6 +133,10 @@ blastcheck --verify manifest.json</code></pre>
 
   <h2>Why this exists</h2>
   <p><a href="/the-plan-was-right/"><strong>The plan was right. The state was wrong.</strong></a> — a Terraform apply that took production down on a change whose plan was three lines long and completely correct, and why every pre-apply tool would have passed it.</p>
+
+  <h2>Contact</h2>
+  <p>Bug reports and feature requests: <a href="https://github.com/prococonsulting/blastcheck/issues">open an issue</a>. Questions about the format, or about implementing it in another tool: <a href="https://github.com/prococonsulting/impact-manifest/issues">the specification repository</a>, or email <a href="mailto:kproffitt@prococonsulting.com">kproffitt@prococonsulting.com</a>.</p>
+  <p>Built and maintained by Kevin Proffitt — <a href="https://prococonsulting.com">prococonsulting.com</a>, <a href="https://www.linkedin.com/in/kevin-proffitt">LinkedIn</a>.</p>
 
   <div class="links">
     <a href="/the-plan-was-right/">Read the write-up</a>

@@ -99,7 +99,19 @@ blastcheck implements the [Impact Manifest specification](https://github.com/pro
 
 ## Status
 
-v0.1 — draft, narrow, and evolving alongside the spec (which does not freeze at 1.0 until this tool has run against real Terraform plans).
+v0.2 — draft, narrow, and evolving alongside the spec (which does not freeze at 1.0 until this tool has run against real Terraform plans).
+
+## Contributing and contact
+
+The bar for a change, and how to add a rule: [CONTRIBUTING.md](./CONTRIBUTING.md).
+Security reports: [SECURITY.md](./SECURITY.md).
+
+If you are implementing the Impact Manifest format in another tool, open an
+issue on [the specification repository](https://github.com/prococonsulting/impact-manifest) —
+ambiguities in the spec are the most useful feedback it can get while it is
+still v0.1 draft.
+
+Anything else: kproffitt@prococonsulting.com
 
 ## License
 
