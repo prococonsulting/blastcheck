@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>blastcheck — change safety for a Terraform plan</title>
+<meta name="description" content="blastcheck reads a terraform show -json plan and emits an Impact Manifest: a machine-readable change-safety assertion. Free, offline, Apache-2.0.">
+<link rel="canonical" href="https://blastcheck.dev/">
+<meta property="og:title" content="blastcheck">
+<meta property="og:description" content="A Terraform plan tells you what will change. It does not tell you whether the change is safe.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://blastcheck.dev/">
+<meta name="twitter:card" content="summary">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23c2410c'/><path d='M16 6l8 4v7c0 5-3.4 8-8 9-4.6-1-8-4-8-9v-7z' fill='none' stroke='white' stroke-width='2.2'/></svg>">
+<style>
+:root{
+  --bg:#fbfaf9; --fg:#1c1a18; --muted:#6b6560; --rule:#e5e1dc;
+  --accent:#b8460e; --code-bg:#f2efec; --card:#ffffff;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#141311; --fg:#e9e5e0; --muted:#9a938c; --rule:#2c2926;
+    --accent:#f08a4b; --code-bg:#1e1c1a; --card:#1a1817;
+  }
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font:16px/1.65 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:46rem; margin:0 auto; padding:4.5rem 1.5rem 6rem}
+code,pre{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+code{background:var(--code-bg); padding:.14em .38em; border-radius:4px; font-size:.88em}
+pre{
+  background:var(--code-bg); padding:1rem 1.1rem; border-radius:8px;
+  overflow-x:auto; font-size:.86rem; line-height:1.6; border:1px solid var(--rule);
+}
+pre code{background:none; padding:0; font-size:inherit}
+a{color:var(--accent)}
+a:hover{text-decoration-thickness:2px}
+h1{font-size:2.6rem; letter-spacing:-.03em; margin:0 0 .4rem; font-weight:650}
+h2{font-size:1.05rem; letter-spacing:.02em; text-transform:uppercase; color:var(--muted);
+   font-weight:600; margin:3.5rem 0 1rem}
+.lede{font-size:1.22rem; line-height:1.5; color:var(--fg); margin:0 0 .6rem; text-wrap:balance}
+.sub{color:var(--muted); margin:0 0 2.5rem}
+.rule{border:0; border-top:1px solid var(--rule); margin:0}
+.pill{
+  display:inline-block; font-size:.74rem; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--muted); border:1px solid var(--rule); border-radius:100px;
+  padding:.2rem .7rem; margin-bottom:1.6rem;
+}
+.callout{
+  background:var(--card); border:1px solid var(--rule); border-left:3px solid var(--accent);
+  border-radius:8px; padding:1.1rem 1.25rem; margin:1.5rem 0;
+}
+.callout p{margin:0}
+.callout strong{color:var(--accent)}
+table{width:100%; border-collapse:collapse; font-size:.92rem; margin:1rem 0}
+th,td{text-align:left; padding:.55rem .6rem; border-bottom:1px solid var(--rule); vertical-align:top}
+th{font-weight:600; color:var(--muted); font-size:.8rem; text-transform:uppercase; letter-spacing:.04em}
+td code{white-space:nowrap}
+.links{display:flex; flex-wrap:wrap; gap:.6rem; margin-top:1.2rem}
+.links a{
+  border:1px solid var(--rule); background:var(--card); border-radius:7px;
+  padding:.55rem .95rem; text-decoration:none; color:var(--fg); font-size:.92rem;
+}
+.links a:hover{border-color:var(--accent); color:var(--accent)}
+footer{margin-top:5rem; padding-top:1.5rem; border-top:1px solid var(--rule);
+       color:var(--muted); font-size:.87rem}
+footer a{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <span class="pill">v0.1 &middot; draft &middot; Apache-2.0</span>
+  <h1>blastcheck</h1>
+  <p class="lede">A Terraform plan tells you <em>what</em> will change. It does not tell you whether the change is <em>safe</em>.</p>
+  <p class="sub">blastcheck reads <code>terraform show -json</code> and emits an <a href="https://github.com/prococonsulting/impact-manifest">Impact Manifest</a>: a machine-readable change-safety assertion. Free, offline, no credentials, no hosted service.</p>
+
+  <hr class="rule">
+
+  <h2>Landed here from a manifest.json?</h2>
+  <p>That file was produced by this tool. It records, for every resource change in a plan, whether the change is reversible, whether anything becomes unrecoverable, whether exposure widens, and — the part that matters most — what could <em>not</em> be determined.</p>
+
+  <div class="callout">
+    <p><strong>An <code>unknown</code> in that document is not a bug.</strong> It means the producer could not verify something, and is saying so rather than guessing. Unproven is not safe, and a consumer must never treat it as such.</p>
+  </div>
+
+  <h2>Install</h2>
+<pre><code>pip install blastcheck
+
+terraform plan -out tfplan
+terraform show -json tfplan | blastcheck &gt; manifest.json</code></pre>
+
+  <p>In a pull request:</p>
+<pre><code>- run: terraform show -json tfplan &gt; plan.json
+
+- uses: prococonsulting/blastcheck@v0
+  with:
+    plan: plan.json</code></pre>
+
+  <h2>What it reads from a plan alone</h2>
+  <table>
+    <tr><th>Dimension</th><th>Example the plan can actually prove</th></tr>
+    <tr><td><code>reversibility</code></td><td>An Azure managed disk grow is one-way. Azure cannot shrink a disk.</td></tr>
+    <tr><td><code>security_posture</code></td><td>An inbound rule opening <code>0.0.0.0/0</code> to 22 or 3389; a storage account turning on public access, lowering TLS, or flipping its firewall to default-allow.</td></tr>
+    <tr><td><code>data_durability</code></td><td>A delete removes the primary copy of a data-bearing resource, and recoverability is <em>unverified</em> rather than assumed.</td></tr>
+    <tr><td><code>state_confidence</code></td><td>Always <code>not_verified</code> offline. A plan trusts recorded state; nothing here checked that trust.</td></tr>
+  </table>
+
+  <h2>Why it never says <code>safe</code></h2>
+  <p>blastcheck is offline by design. It never queries live cloud state, so it is not entitled to certify that a change is safe — it can only report <code>caution</code>, <code>blocked</code>, or <code>unknown</code>. That is not a limitation being apologised for. A tool that says <code>safe</code> when it means <em>I found no problem</em> converts an absence of information into a green light and puts someone's name on it.</p>
+  <p>A false <code>safe</code> is catastrophic. A false <code>unknown</code> is annoying. The format is built around that asymmetry.</p>
+
+  <h2>Tamper-evident</h2>
+<pre><code>blastcheck --plan plan.json --sign &gt; manifest.json
+blastcheck --verify manifest.json</code></pre>
+  <p><code>--sign</code> attaches a digest over the manifest canonicalized with <a href="https://www.rfc-editor.org/rfc/rfc8785">JCS (RFC 8785)</a>, so two conformant producers of the same logical document compute the same bytes. Editing a verdict after the fact breaks verification.</p>
+
+  <h2>The format is not owned by this tool</h2>
+  <p>Impact Manifest is an open specification, Apache-2.0, with no assumption of any cloud and no coupling to any implementation. blastcheck is <em>a</em> reference producer of it, not its owner. Other tools are expected to implement it, and the format is only worth anything if they do.</p>
+
+  <div class="links">
+    <a href="https://github.com/prococonsulting/impact-manifest">Specification &amp; schema</a>
+    <a href="https://github.com/prococonsulting/blastcheck">Source</a>
+    <a href="https://pypi.org/project/blastcheck/">PyPI</a>
+  </div>
+
+  <footer>
+    <p>Scope in v0.1 is deliberately narrow: Azure managed disks, virtual machines, network security groups and rules, storage accounts, SQL databases. Anything else in a plan is recorded under <code>extensions.skipped</code>, never silently dropped. The specification does not freeze at 1.0 until this tool has run against real Terraform plans.</p>
+    <p>Apache-2.0. Built by <a href="https://prococonsulting.com">Kevin Proffitt</a>.</p>
+  </footer>
+
+</div>
+</body>
+</html>
