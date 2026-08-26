@@ -1,0 +1,25 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "resource_changes": [
+    {
+      "address": "azurerm_storage_account.data",
+      "type": "azurerm_storage_account",
+      "name": "data",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["update"],
+        "before": {
+          "name": "stdata001",
+          "min_tls_version": "TLS1_2",
+          "network_rules": [ { "default_action": "Deny", "ip_rules": ["203.0.113.4"] } ]
+        },
+        "after": {
+          "name": "stdata001",
+          "min_tls_version": "TLS1_2",
+          "network_rules": [ { "default_action": "Allow", "ip_rules": ["203.0.113.4"] } ]
+        }
+      }
+    }
+  ]
+}

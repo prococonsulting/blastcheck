@@ -1,0 +1,27 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "resource_changes": [
+    {
+      "address": "azurerm_network_security_rule.rdp",
+      "mode": "managed",
+      "type": "azurerm_network_security_rule",
+      "name": "rdp",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "name": "allow-rdp",
+          "direction": "Inbound",
+          "access": "Allow",
+          "protocol": "Tcp",
+          "source_address_prefix": "*",
+          "destination_port_range": "3389"
+        }
+      }
+    }
+  ]
+}

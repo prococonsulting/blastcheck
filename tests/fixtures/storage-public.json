@@ -1,0 +1,25 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "resource_changes": [
+    {
+      "address": "azurerm_storage_account.archive",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "archive",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "name": "archive9931",
+          "public_network_access_enabled": true,
+          "allow_nested_items_to_be_public": true,
+          "min_tls_version": "TLS1_2"
+        }
+      }
+    }
+  ]
+}

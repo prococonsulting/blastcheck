@@ -1,0 +1,26 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "resource_changes": [
+    {
+      "address": "azurerm_managed_disk.sql",
+      "mode": "managed",
+      "type": "azurerm_managed_disk",
+      "name": "sql",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": [
+          "update"
+        ],
+        "before": {
+          "name": "sql-data-01",
+          "disk_size_gb": 128
+        },
+        "after": {
+          "name": "sql-data-01",
+          "disk_size_gb": 256
+        }
+      }
+    }
+  ]
+}

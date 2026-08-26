@@ -1,0 +1,18 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "resource_changes": [
+    {
+      "address": "azurerm_managed_disk.data",
+      "type": "azurerm_managed_disk",
+      "name": "data",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["update"],
+        "before": { "name": "data", "disk_size_gb": 256, "storage_account_type": "Premium_LRS" },
+        "after": { "name": "data", "disk_size_gb": null, "storage_account_type": "Premium_LRS" },
+        "after_unknown": { "disk_size_gb": true }
+      }
+    }
+  ]
+}
