@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 SCHEMA_VERSION = "0.1.0"
-PRODUCER_VERSION = "0.1.0"
+PRODUCER_VERSION = "0.1.1"
 
 # ── Supported Azure resource surface ─────────────────────────────────────────
 _DATA_BEARING = {

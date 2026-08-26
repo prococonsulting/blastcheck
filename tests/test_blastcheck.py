@@ -15,9 +15,10 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from blastcheck.core import build_manifest, load_plan, PlanError, _action
+from blastcheck import schema_path
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SCHEMA = json.loads((ROOT / "schema" / "impact-manifest.schema.json").read_text())
+SCHEMA = json.loads(schema_path().read_text())
 FIXTURES = ROOT / "tests" / "fixtures"
 NOW = datetime(2026, 8, 26, 16, 0, 0, tzinfo=timezone.utc)  # fixed for determinism
 

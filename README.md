@@ -31,7 +31,7 @@ Azure: managed disks, virtual machines, network security groups (+ rules), stora
 ## Install & use
 
 ```
-pip install .
+pip install blastcheck
 terraform show -json plan.tfplan | blastcheck            # stdin
 blastcheck --plan plan.json > manifest.json              # from a file
 blastcheck --compact                                     # single-line JSON
@@ -65,7 +65,7 @@ Note what you *cannot* write: there is no `verdict == 'safe'` gate to pass on a 
 
 ## Tests
 
-The suite's primary job is to prove every emitted manifest **validates against the vendored schema** (`schema/impact-manifest.schema.json`) on realistic plan fixtures — that is how a schema shape error surfaces.
+The suite's primary job is to prove every emitted manifest **validates against the vendored schema** (`blastcheck/schema/impact-manifest.schema.json`) on realistic plan fixtures — that is how a schema shape error surfaces.
 
 ```
 pip install -e ".[test]"
@@ -74,7 +74,7 @@ pytest
 
 ## Relationship to the spec
 
-blastcheck implements the Impact Manifest specification (the sibling `impact-manifest` repo) and vendors a pinned copy of its schema under `schema/`. The format is open and vendor-neutral; blastcheck is *a* reference implementation of it, not its owner.
+blastcheck implements the Impact Manifest specification (the sibling `impact-manifest` repo) and vendors a pinned copy of its schema at `blastcheck/schema/`, which ships inside the wheel. The format is open and vendor-neutral; blastcheck is *a* reference implementation of it, not its owner.
 
 ## Status
 

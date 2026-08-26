@@ -17,9 +17,10 @@ from blastcheck.canonical import (
     verify_integrity,
 )
 from blastcheck.core import build_manifest, load_plan
+from blastcheck import schema_path
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SCHEMA = json.loads((ROOT / "schema" / "impact-manifest.schema.json").read_text())
+SCHEMA = json.loads(schema_path().read_text())
 VALIDATOR = Draft202012Validator(SCHEMA)
 FIXTURES = ROOT / "tests" / "fixtures"
 

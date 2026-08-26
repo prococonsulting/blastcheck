@@ -1,0 +1,9 @@
+# The sdist must be able to run its own test suite. Without the fixtures and the
+# schema, `pip download blastcheck && pytest` cannot check the one property that
+# matters most: that every emitted manifest validates against the contract.
+include LICENSE
+include README.md
+include action.yml
+recursive-include blastcheck/schema *.json
+recursive-include tests *.py
+recursive-include tests/fixtures *.json
