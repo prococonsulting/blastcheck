@@ -18,6 +18,7 @@ import json
 import sys
 
 from .canonical import CanonicalizationError, attach_integrity, verify_integrity
+from .live import probe_plan, prober_for
 from .core import build_manifest, load_plan, PlanError, PRODUCER_VERSION
 
 
@@ -35,6 +36,13 @@ def main(argv=None) -> int:
     p.add_argument("--verify", metavar="MANIFEST",
                    help="verify an existing manifest's integrity.digest and exit; "
                         "exits 1 if the digest is absent or does not match")
+    p.add_argument("--live", metavar="PROVIDER", nargs="?", const="azure",
+                   help="verify recorded state against live cloud reality using the provider's own "
+                        "CLI and your existing login (default: azure). blastcheck never reads, stores "
+                        "or accepts a credential, and only ever issues read-only commands. This is the "
+                        "only mode in which a `safe` verdict is reachable.")
+    p.add_argument("--live-timeout", type=float, default=20.0, metavar="SECONDS",
+                   help="per-resource timeout for live reads (default: 20)")
     p.add_argument("--version", action="version", version=f"blastcheck {PRODUCER_VERSION}")
     args = p.parse_args(argv)
 
@@ -66,7 +74,35 @@ def main(argv=None) -> int:
         return 1
 
     try:
-        manifest = build_manifest(load_plan(text))
+        plan = load_plan(text)
+    except PlanError as e:
+        print(f"blastcheck: {e}", file=sys.stderr)
+        return 1
+
+    observations = None
+    if args.live:
+        try:
+            prober = prober_for(args.live, timeout=args.live_timeout)
+        except ValueError as e:
+            print(f"blastcheck: {e}", file=sys.stderr)
+            return 1
+        # An unavailable prober is NOT a fatal error. The manifest is still
+        # worth producing; it just records `access.live_state: unavailable` and
+        # every state verdict stays unverified, with the reason stated. Exiting
+        # here would trade a useful honest answer for no answer at all.
+        why = prober.available()
+        if why:
+            print(f"blastcheck: live checks unavailable ({why}); continuing plan-only",
+                  file=sys.stderr)
+            observations = {}
+        else:
+            observations = probe_plan(plan, prober)
+            usable = sum(1 for o in observations.values() if o.usable)
+            print(f"blastcheck: live read {usable}/{len(observations)} resource(s) via {prober.name}",
+                  file=sys.stderr)
+
+    try:
+        manifest = build_manifest(plan, observations=observations)
     except PlanError as e:
         print(f"blastcheck: {e}", file=sys.stderr)
         return 1

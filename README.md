@@ -11,9 +11,9 @@ terraform show -json plan.tfplan | blastcheck > manifest.json
 
 ## What it does, and what it deliberately doesn't
 
-blastcheck is **offline**: no credentials, no network, no hosted service. It reasons from the plan artifact alone. Wherever a verdict genuinely requires live cloud state — "is this disk attached to something serving traffic?", "does a backup exist?" — it emits `unknown` / `not_verified` **with a stated reason**, rather than guessing.
+blastcheck is **offline by default**: no credentials, no network, no hosted service. It reasons from the plan artifact alone. Wherever a verdict genuinely requires live cloud state — "is this disk attached to something serving traffic?", "does a backup exist?" — it emits `unknown` / `not_verified` **with a stated reason**, rather than guessing.
 
-A direct consequence, and the point of the format: **a plan-only run can never emit `safe`.** It never verified live state, so it says `caution`, `blocked`, or `unknown` — never `safe`. Certifying `safe` requires the live-state enrichment that a later version (or a paid consumer) layers on. blastcheck is honest about the ceiling of what a plan alone can prove.
+A direct consequence, and the point of the format: **a plan-only run can never emit `safe`.** It never verified live state, so it says `caution`, `blocked`, or `unknown` — never `safe`. Certifying `safe` requires `--live` (below). blastcheck is honest about the ceiling of what a plan alone can prove.
 
 What it derives from the plan alone is still substantial:
 
@@ -74,7 +74,31 @@ blastcheck --plan plan.json > manifest.json              # from a file
 blastcheck --compact                                     # single-line JSON
 ```
 
-No hosted service, no cloud credentials, no network, no runtime dependencies — it runs entirely against the plan file.
+No hosted service, no network, no runtime dependencies — a default run works entirely against the plan file.
+
+## Live checks: earning a `safe` verdict
+
+```
+blastcheck --plan plan.json --live > manifest.json
+```
+
+`--live` verifies recorded state against live cloud reality. **It is the only mode in which a `safe` verdict is reachable.**
+
+**blastcheck never handles a credential.** It shells out to the provider's own CLI and uses the session you already have — `az login`, SSO, managed identity, whatever your environment provides. Nothing is read from a config file, nothing is accepted as a flag, nothing is stored. A tool that asks you to hand it cloud credentials so it can tell you whether a change is safe has an obvious problem.
+
+It also never writes. Every command is built from a fixed template with a read-only verb, and a test asserts that no mutating verb can reach a subprocess call.
+
+| | plan-only | with `--live` |
+|---|---|---|
+| `state_confidence` | `not_verified`, or `drift_detected` from Terraform's refresh | **`state_matches_reality`**, or drift blastcheck found itself |
+| `availability_impact` | `unknown` for anything that already exists | `interrupts` when something is attached to it |
+| verdict | never `safe` | `safe` only when every change was verified and none is dangerous |
+
+A failed probe — no CLI, not logged in, no permission, a timeout — does **not** degrade to a guess. The dimension stays `unknown`, the reason appears in the rationale, and `producer.access.live_state` records `unavailable` rather than `queried`. Asking and being refused is a different fact from never asking, and a reader interpreting an `unknown` needs to know which one happened.
+
+Two things `--live` deliberately does not do. It does not average: **one unverified change denies `safe` to the whole plan**, because a plan is only as trustworthy as its least verified change. And existence alone is not a match — a resource that is present but shares no comparable attribute with recorded state stays `not_verified`.
+
+Azure today. The prober is an interface; adding a provider is about a hundred lines.
 
 ## In CI
 
@@ -98,7 +122,7 @@ The manifest is uploaded as a build artifact and the verdict is posted on the pu
   run: exit 1
 ```
 
-Note what you *cannot* write: there is no `verdict == 'safe'` gate to pass on a plan-only run, because a plan-only run never emits `safe`. A pipeline that proceeds only on a positive safety claim needs the live-state enrichment. That is the honest ceiling of what a plan by itself can prove.
+Note what you *cannot* write on a plan-only run: there is no `verdict == 'safe'` to gate on, because a plan-only run never emits one. A pipeline that proceeds only on a positive safety claim needs `--live`, and the credentials that implies. That is the honest ceiling of what a plan by itself can prove.
 
 ## Tests
 
@@ -115,7 +139,7 @@ blastcheck implements the [Impact Manifest specification](https://github.com/pro
 
 ## Status
 
-v0.3 — draft, and evolving alongside the spec (which does not freeze at 1.0 until this tool has run against real Terraform plans).
+v0.4 — draft, and evolving alongside the spec (which does not freeze at 1.0 until this tool has run against real Terraform plans).
 
 ## Contributing and contact
 

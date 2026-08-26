@@ -42,7 +42,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 SCHEMA_VERSION = "0.1.0"
-PRODUCER_VERSION = "0.3.0"
+PRODUCER_VERSION = "0.4.0"
 
 # Plan JSON format versions this tool has been exercised against. Terraform 0.12
 # emitted "0.1"; 1.x emits "1.x". Reading an unrecognised major without saying so
@@ -566,6 +566,83 @@ def _drifted_fields(entry: Dict[str, Any], limit: int = 6) -> List[str]:
     return names[:limit]
 
 
+def _norm_key(k: str) -> str:
+    """`disk_size_gb` and `diskSizeGB` are the same field. Terraform uses snake
+    case, ARM returns camel case, and comparing them literally would report drift
+    on every single attribute of every single resource."""
+    return re.sub(r"[^a-z0-9]", "", str(k).lower())
+
+
+def _live_state_confidence(obs: Any, before: dict, base: str,
+                           plan_ref: List[str]) -> Tuple[Dict[str, Any], List[dict]]:
+    """State confidence from a live read blastcheck performed itself.
+
+    This is the only path in the tool that can return `state_matches_reality`,
+    and therefore the only path that makes a `safe` verdict reachable. It is
+    deliberately conservative: only scalar attributes present on BOTH sides are
+    compared, because a nested block or a computed field differing tells you
+    nothing, and a false drift report is as corrosive to trust as a false safe."""
+    ev_id = f"{base}-live"
+
+    if obs is None or not getattr(obs, "usable", False):
+        why = getattr(obs, "error", None) or "no live observation was attempted for this resource"
+        return ({"value": "not_verified", "verified_against_live": False, "confidence": "high",
+                 "rationale": f"A live read was attempted but did not produce a usable answer: {why}. "
+                              "Recorded state therefore remains unverified.",
+                 "evidence": plan_ref},
+                [_ev(ev_id, "live read", why, source="live_state")])
+
+    if obs.found is False:
+        return ({"value": "drift_detected", "verified_against_live": True, "confidence": "high",
+                 "rationale": "The resource recorded in state does not exist in the cloud. Anything this "
+                              "plan intends to do to it was computed against a description of something "
+                              "that is not there.",
+                 "evidence": plan_ref + [ev_id]},
+                [_ev(ev_id, f"live lookup of {obs.address}", "resource not found", source="live_state")])
+
+    live = {_norm_key(k): v for k, v in (obs.attributes or {}).items()}
+    diffs = []
+    for k, v in (before or {}).items():
+        if isinstance(v, (dict, list)) or v is None:
+            continue  # only scalars are comparable across the two namespaces
+        lk = _norm_key(k)
+        if lk not in live:
+            continue
+        lv = live[lk]
+        if isinstance(lv, (dict, list)) or lv is None:
+            continue
+        if isinstance(v, bool) != isinstance(lv, bool):
+            continue
+        if str(v) != str(lv):
+            diffs.append(f"{k}: state {v!r} -> live {lv!r}")
+
+    if diffs:
+        return ({"value": "drift_detected", "verified_against_live": True, "confidence": "high",
+                 "rationale": "A live read found this resource differs from the state the plan was "
+                              "computed against (" + "; ".join(diffs[:4]) + ").",
+                 "evidence": plan_ref + [ev_id]},
+                [_ev(ev_id, f"live lookup of {obs.address}", "; ".join(diffs[:6]),
+                     source="live_state")])
+
+    compared = sum(1 for k, v in (before or {}).items()
+                   if not isinstance(v, (dict, list)) and v is not None and _norm_key(k) in live)
+    if compared == 0:
+        return ({"value": "not_verified", "verified_against_live": False, "confidence": "medium",
+                 "rationale": "The resource exists live, but no scalar attribute could be compared "
+                              "against recorded state, so state was not actually verified. Existence "
+                              "alone is not a match.",
+                 "evidence": plan_ref + [ev_id]},
+                [_ev(ev_id, f"live lookup of {obs.address}",
+                     "resource exists; no comparable scalar attributes", source="live_state")])
+
+    return ({"value": "state_matches_reality", "verified_against_live": True, "confidence": "high",
+             "rationale": f"A live read confirmed this resource matches the state the plan was computed "
+                          f"against, on {compared} comparable attribute(s).",
+             "evidence": plan_ref + [ev_id]},
+            [_ev(ev_id, f"live lookup of {obs.address}",
+                 f"{compared} scalar attribute(s) match recorded state", source="live_state")])
+
+
 def _state_confidence(drift: Optional[Dict[str, Any]], base: str,
                       plan_ref: List[str]) -> Tuple[Dict[str, Any], List[dict]]:
     if not drift:
@@ -640,8 +717,33 @@ def _severity(dims: Dict[str, Any]) -> Tuple[str, str]:
     return "informational", "No dangerous or undetermined dimension found."
 
 
+def _live_availability(obs: Any, action: str, ev: List[str]) -> Optional[Dict[str, Any]]:
+    """Availability from a live read. Returns None when the observation cannot
+    settle it, so the caller falls back to the honest plan-only `unknown`."""
+    if obs is None or not getattr(obs, "usable", False) or obs.found is not True:
+        return None
+    attrs = {_norm_key(k): v for k, v in (obs.attributes or {}).items()}
+
+    # `managedBy` is the ARM-wide way a resource says something else owns it —
+    # a disk attached to a VM, for instance. Provider-agnostic within Azure
+    # rather than a per-type special case.
+    owner = attrs.get("managedby")
+    if action in ("delete", "replace", "update") and isinstance(owner, str) and owner.strip():
+        return {"value": "interrupts", "serves_production_traffic": "unknown", "confidence": "medium",
+                "rationale": f"A live read shows this resource is attached to another resource "
+                             f"({owner.rsplit('/', 1)[-1]}). Changing it is not isolated. Whether that "
+                             "owner serves production traffic was not determined.",
+                "evidence": ev}
+    if action in ("delete", "replace", "update") and owner is not None and not str(owner).strip():
+        return {"value": "none", "confidence": "medium",
+                "rationale": "A live read shows nothing currently owns or is attached to this resource.",
+                "evidence": ev}
+    return None
+
+
 def analyze_change(index: int, rc: Dict[str, Any],
-                   drift: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], List[dict]]:
+                   drift: Optional[Dict[str, Any]] = None,
+                   obs: Any = None) -> Tuple[Dict[str, Any], List[dict]]:
     addr = str(rc.get("address", ""))
     rtype = str(rc.get("type", ""))
     change = rc.get("change") or {}
@@ -665,25 +767,38 @@ def analyze_change(index: int, rc: Dict[str, Any],
     # Layer 0. Terraform states, in every provider, WHY it chose this action and
     # WHICH attribute forced a replacement. That is free, structural signal and
     # blastcheck was throwing it away.
-    obs = f"actions={actions_raw}; type={rtype}"
+    # NB: named plan_obs, not obs. `obs` is the live-observation parameter, and
+    # shadowing it here made every change take the live-read path with a string
+    # in place of an Observation — a silent, total degradation of live mode that
+    # only surfaced because a drift test counted its evidence items.
+    plan_obs = f"actions={actions_raw}; type={rtype}"
     reason = rc.get("action_reason")
     if reason:
-        obs += f"; action_reason={reason}"
+        plan_obs += f"; action_reason={reason}"
     paths = change.get("replace_paths")
     if isinstance(paths, list) and paths:
         pretty = [".".join(str(p) for p in seg) if isinstance(seg, list) else str(seg) for seg in paths]
-        obs += f"; replacement forced by: {', '.join(pretty[:6])}"
+        plan_obs += f"; replacement forced by: {', '.join(pretty[:6])}"
     if unresolved_now:
-        obs += f"; not known until apply: {', '.join(unresolved_now[:8])}"
-    evidence = [_ev(f"{base}-plan", f"resource_changes[] where address == {addr}", obs)]
+        plan_obs += f"; not known until apply: {', '.join(unresolved_now[:8])}"
+    evidence = [_ev(f"{base}-plan", f"resource_changes[] where address == {addr}", plan_obs)]
 
     sec_dim, sec_ev = _security(action, rtype, before, after, after_unknown, after_sensitive, base)
     evidence.extend(sec_ev)
-    state_dim, state_ev = _state_confidence(drift, base, plan_ref)
+    # A live read outranks Terraform's refresh: it is this tool's own observation,
+    # taken now, rather than one inherited from an artifact of unknown age. Drift
+    # already found by refresh is still reported if the live read is unusable.
+    if obs is not None:
+        state_dim, state_ev = _live_state_confidence(obs, before, base, plan_ref)
+        if state_dim["value"] == "not_verified" and drift:
+            state_dim, state_ev = _state_confidence(drift, base, plan_ref)
+    else:
+        state_dim, state_ev = _state_confidence(drift, base, plan_ref)
     evidence.extend(state_ev)
 
+    live_av = _live_availability(obs, action, plan_ref)
     dims = {
-        "availability_impact": _availability(action, plan_ref),
+        "availability_impact": live_av or _availability(action, plan_ref),
         "reversibility": _reversibility(action, rtype, before, after, after_unknown, after_sensitive, plan_ref),
         "data_durability": _data_durability(action, rtype, plan_ref),
         "security_posture": sec_dim,
@@ -731,18 +846,45 @@ def _verdict(changes: List[dict]) -> Dict[str, Any]:
         decision, why = "unknown", (f"{len(unknown)} change(s) could not be certified without live state: "
                                     f"{', '.join(unknown)}. Unproven is not safe.")
     else:
-        # No danger and no unknowns — but blastcheck ran plan-only, so state was
-        # never verified. It CANNOT emit `safe`; that requires live-state enrichment.
-        decision, why = "caution", ("No dangerous or undetermined change found, but this was a plan-only run: "
-                                     "live state was never verified, so the plan cannot be certified `safe`. "
-                                     "Re-run with live-state enrichment to reach a `safe` verdict.")
+        # Nothing dangerous and nothing undetermined. Whether that earns `safe`
+        # turns on one question: was recorded state actually verified against
+        # reality? Conformance rule 5 forbids `safe` for any change whose
+        # state_confidence is not a positive determination, and rule 3 says
+        # `safe` is a positive claim rather than the absence of a known problem.
+        # Both are satisfied only when every change was checked and matched.
+        verified = [c for c in changes
+                    if c["state_confidence"]["value"] == "state_matches_reality"]
+        if len(verified) == len(changes) and changes:
+            decision = "safe"
+            why = (f"All {len(changes)} change(s) were assessed with no dangerous or undetermined "
+                   "dimension, and recorded state was verified against live reality for every one of "
+                   "them. This is a positive claim, not the absence of a finding.")
+        else:
+            unverified = len(changes) - len(verified)
+            decision, why = "caution", (
+                f"No dangerous or undetermined change was found, but recorded state was not verified "
+                f"against reality for {unverified} of {len(changes)} change(s). A plan is only as "
+                "trustworthy as the state it was computed against, so this cannot be certified `safe`. "
+                "Re-run with `--live` to resolve it.")
     return {"decision": decision, "rationale": why,
             "blocking_changes": blocking + unknown, "unknowns_present": unknowns_present}
 
 
+def _live_access(observations: Optional[Dict[str, Any]]) -> str:
+    """`queried` only if a live read actually answered. Attempting and being
+    refused is `unavailable`: a reader interpreting an `unknown` needs to know
+    whether the producer even had the access to determine otherwise."""
+    if not observations:
+        return "not_attempted"
+    if any(getattr(o, "usable", False) for o in observations.values()):
+        return "queried"
+    return "unavailable"
+
+
 # ── Top-level: plan -> manifest ──────────────────────────────────────────────
 
-def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
+def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None,
+                   observations: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     now = now or datetime.now(timezone.utc)
 
     # Terraform's refresh findings, keyed by address. See _state_confidence().
@@ -773,7 +915,9 @@ def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None) -> Dict
 
     changes, evidence = [], []
     for i, rc in enumerate(supported):
-        ch, ev = analyze_change(i, rc, drift_by_address.get(str(rc.get("address", ""))))
+        addr_i = str(rc.get("address", ""))
+        ch, ev = analyze_change(i, rc, drift_by_address.get(addr_i),
+                                (observations or {}).get(addr_i))
         changes.append(ch)
         evidence.extend(ev)
 
@@ -784,8 +928,11 @@ def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None) -> Dict
         "valid_until": (now + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "producer": {
             "name": "blastcheck", "version": PRODUCER_VERSION, "homepage": "https://blastcheck.dev",
-            # Plan-only run: live state was not attempted. This is WHY unknowns exist.
-            "access": {"live_state": "not_attempted"},
+            # What blastcheck itself could see. `queried` only when at least one
+            # live read actually returned an answer — asking and being refused
+            # is `unavailable`, which is a different fact and a reader needs it
+            # to interpret the unknowns below.
+            "access": {"live_state": _live_access(observations)},
         },
         "source": {
             "type": "terraform_plan",

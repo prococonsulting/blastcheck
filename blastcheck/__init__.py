@@ -3,6 +3,7 @@ from pathlib import Path
 
 from .core import build_manifest, load_plan, PlanError, SCHEMA_VERSION, PRODUCER_VERSION
 from .canonical import canonicalize, compute_digest, attach_integrity, verify_integrity
+from .live import Observation, Prober, prober_for, probe_plan
 
 __version__ = PRODUCER_VERSION
 
@@ -27,4 +28,5 @@ __all__ = [
     "build_manifest", "load_plan", "PlanError", "SCHEMA_VERSION", "PRODUCER_VERSION",
     "canonicalize", "compute_digest", "attach_integrity", "verify_integrity",
     "schema_path",
+    "Observation", "Prober", "prober_for", "probe_plan",
 ]
