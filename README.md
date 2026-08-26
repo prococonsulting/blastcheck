@@ -37,7 +37,31 @@ blastcheck --plan plan.json > manifest.json              # from a file
 blastcheck --compact                                     # single-line JSON
 ```
 
-No hosted service, no cloud credentials, no network — it runs entirely against the plan file.
+No hosted service, no cloud credentials, no network, no runtime dependencies — it runs entirely against the plan file.
+
+## In CI
+
+```yaml
+- run: terraform show -json tfplan > plan.json
+
+- uses: prococonsulting/blastcheck@v0
+  with:
+    plan: plan.json
+```
+
+The manifest is uploaded as a build artifact and the verdict is posted on the pull request. The action **does not fail the build** — blastcheck is a producer, not a gate, and what a `blocked` verdict should do to a pipeline is a policy question that belongs to you. To gate on it:
+
+```yaml
+- uses: prococonsulting/blastcheck@v0
+  id: bc
+  with:
+    plan: plan.json
+
+- if: steps.bc.outputs.verdict == 'blocked'
+  run: exit 1
+```
+
+Note what you *cannot* write: there is no `verdict == 'safe'` gate to pass on a plan-only run, because a plan-only run never emits `safe`. A pipeline that proceeds only on a positive safety claim needs the live-state enrichment. That is the honest ceiling of what a plan by itself can prove.
 
 ## Tests
 

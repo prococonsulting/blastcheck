@@ -1,0 +1,112 @@
+name: blastcheck
+description: >-
+  Emit an Impact Manifest change-safety assertion from a Terraform plan, upload
+  it as a build artifact, and post the verdict on the pull request.
+author: Kevin Proffitt
+
+branding:
+  icon: shield
+  color: orange
+
+inputs:
+  plan:
+    description: >-
+      Path to `terraform show -json` output. Produce it with
+      `terraform show -json tfplan > plan.json` in an earlier step.
+    required: true
+  comment:
+    description: Post the verdict as a pull-request comment. Requires GITHUB_TOKEN.
+    required: false
+    default: "true"
+  upload-artifact:
+    description: Upload the manifest as a workflow artifact.
+    required: false
+    default: "true"
+  artifact-name:
+    description: Name of the uploaded artifact.
+    required: false
+    default: impact-manifest
+  output:
+    description: Where to write the manifest.
+    required: false
+    default: manifest.json
+
+outputs:
+  verdict:
+    description: The plan verdict — safe | caution | blocked | unknown.
+    value: ${{ steps.run.outputs.verdict }}
+  unknowns-present:
+    description: Whether any dimension of any change came back unknown.
+    value: ${{ steps.run.outputs.unknowns_present }}
+  manifest:
+    description: Path to the emitted manifest.
+    value: ${{ steps.run.outputs.manifest }}
+
+runs:
+  using: composite
+  steps:
+    # blastcheck has no runtime dependencies, so this is a plain install of the
+    # action's own checkout — no network fetch, no version skew between the
+    # action and the tool it runs.
+    - name: Install blastcheck
+      shell: bash
+      run: python3 -m pip install --quiet "${{ github.action_path }}"
+
+    - name: Produce the Impact Manifest
+      id: run
+      shell: bash
+      run: |
+        set -euo pipefail
+        blastcheck --plan "${{ inputs.plan }}" > "${{ inputs.output }}"
+        verdict=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict']['decision'])" "${{ inputs.output }}")
+        unknowns=$(python3 -c "import json,sys;print(str(json.load(open(sys.argv[1]))['verdict'].get('unknowns_present',False)).lower())" "${{ inputs.output }}")
+        echo "verdict=$verdict"              >> "$GITHUB_OUTPUT"
+        echo "unknowns_present=$unknowns"    >> "$GITHUB_OUTPUT"
+        echo "manifest=${{ inputs.output }}" >> "$GITHUB_OUTPUT"
+        echo "blastcheck verdict: $verdict"
+
+    - name: Upload the manifest
+      if: inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.output }}
+        if-no-files-found: error
+
+    - name: Comment the verdict on the pull request
+      # Never fail the job on a commenting problem — a missing token or a fork PR
+      # without write permission is a CI configuration detail, not a plan finding.
+      if: inputs.comment == 'true' && github.event_name == 'pull_request'
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -uo pipefail
+        python3 - "${{ inputs.output }}" > body.md <<'PY'
+        import json, sys
+        m = json.load(open(sys.argv[1]))
+        v = m["verdict"]
+        icon = {"safe": "OK", "caution": "CAUTION", "blocked": "BLOCKED", "unknown": "UNKNOWN"}
+        print(f"### blastcheck: `{v['decision']}`\n")
+        print(f"{v.get('rationale','')}\n")
+        rows = []
+        for c in m.get("changes", []):
+            flags = [k.replace("_", " ") for k in
+                     ("availability_impact", "reversibility", "data_durability", "security_posture")
+                     if c[k]["value"] not in ("none", "reversible", "no_data_loss", "unchanged")]
+            rows.append(f"| `{c['address']}` | {c['severity']} | {', '.join(flags) or 'nothing flagged'} |")
+        if rows:
+            print("| change | severity | flagged |")
+            print("|---|---|---|")
+            print("\n".join(rows))
+        skipped = (m.get("extensions") or {}).get("skipped") or []
+        if skipped:
+            print(f"\n{len(skipped)} change(s) outside blastcheck's current scope were "
+                  f"recorded as skipped, not assessed.")
+        print("\n<sub>blastcheck ran plan-only, so it never verified live state and "
+              "cannot certify `safe`. `unknown` means unproven, not safe. "
+              "[What this document is](https://github.com/prococonsulting/impact-manifest)</sub>")
+        PY
+        gh pr comment "${{ github.event.pull_request.number }}" --body-file body.md \
+          || echo "could not post PR comment (missing permission or fork PR); manifest is still in the artifact"

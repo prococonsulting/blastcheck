@@ -10,6 +10,42 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 dependencies = []
+authors = [{ name = "Kevin Proffitt" }]
+keywords = [
+    "terraform",
+    "opentofu",
+    "infrastructure-as-code",
+    "change-management",
+    "blast-radius",
+    "sre",
+    "devops",
+    "azure",
+    "impact-manifest",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://blastcheck.dev"
+Specification = "https://github.com/prococonsulting/impact-manifest"
+Source = "https://github.com/prococonsulting/blastcheck"
+Issues = "https://github.com/prococonsulting/blastcheck/issues"
 
 [project.optional-dependencies]
 # Only needed to run the test suite (which validates output against the schema).
