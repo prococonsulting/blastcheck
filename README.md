@@ -21,7 +21,7 @@ What it derives from the plan alone is still substantial:
 - **Widened exposure** — an inbound NSG rule opening `0.0.0.0/0` to a sensitive port; a storage account turning on public access or lowering TLS.
 - **Data-loss risk** — deleting a data-bearing resource flags the primary copy as removed and recoverability as *unverified*, not *safe*.
 - **Cost direction** and **action semantics**.
-- **Drift** — see below. This is the one place blastcheck reaches a real state determination rather than an `unknown`.
+- **Drift** — see below. This is the one place an *offline* run reaches a real state determination rather than an `unknown`, because Terraform already did the live read for you.
 
 ## Drift, without asking you for credentials
 
@@ -61,7 +61,9 @@ Every change in a plan is assessed. Nothing is skipped for being an unfamiliar t
 
 These findings are graded **`caution`, never `blocking`**, carry `confidence: low`, and their evidence is tagged `source: heuristic`. They are leads, not determinations, and saying so is the difference between a tool people read and a tool people mute. In the same spirit, an open **egress** rule and a default route are not flagged: they are `0.0.0.0/0` by definition, and firing on them would trip on nearly every plan ever written.
 
-**Layer 2** is the precise set: Azure managed disks, virtual machines, network security groups (+ rules), storage accounts, SQL databases. Where a precise rule exists it wins, and a heuristic never overrides it.
+**Layer 2** is the precise set — 110 resource types across AWS and Azure today. Where a precise rule exists it wins, and a heuristic never overrides it.
+
+Layer 2 is **data, not code**. A provider pack is a JSON file declaring which types are data-bearing, which are stateless, which attributes only grow in one direction, and which attribute values widen exposure. Adding a resource type is an edit to a data file plus a test, not a change to the analyzer — which is the only version of this a community can realistically contribute to. Run `blastcheck rules` to see exactly what your build knows; the number in this README is not the one to trust.
 
 `extensions.assessment` records which layer produced each verdict.
 
@@ -81,7 +83,7 @@ blastcheck rules                        # what this build actually knows
 **On a terminal you get a summary; redirected or piped you get the manifest.** No flag needed either way, and `--json` / `--text` force it.
 
 ```
-blastcheck 0.6.0 — 20 change(s) assessed, plan-only
+blastcheck 0.7.0 — 20 change(s) assessed, plan-only
 
   BLOCKED  azurerm_network_security_group.web_tier
            security      inline rule 'allow-ssh-temp': inbound Allow from ['*'] to
@@ -151,13 +153,16 @@ It also never writes. Every command is built from a fixed template with a read-o
 |---|---|---|
 | `state_confidence` | `not_verified`, or `drift_detected` from Terraform's refresh | **`state_matches_reality`**, or drift blastcheck found itself |
 | `availability_impact` | `unknown` for anything that already exists | `interrupts` when something is attached to it |
+| `data_durability` | a delete is *unverified* loss | `unrecoverable_loss` when no recovery point exists — checked, not assumed |
 | verdict | never `safe` | `safe` only when every change was verified and none is dangerous |
+
+The recovery-point check is the one that changes how a delete reads. Plan-only, deleting a database says *this removes the primary copy and I could not verify a backup*. With `--live`, blastcheck asks whether a restore point actually exists: if one does the change becomes `reversible_with_data_loss`, and if none does it becomes `unrecoverable_loss` at high confidence — a determination rather than a caveat.
 
 A failed probe — no CLI, not logged in, no permission, a timeout — does **not** degrade to a guess. The dimension stays `unknown`, the reason appears in the rationale, and `producer.access.live_state` records `unavailable` rather than `queried`. Asking and being refused is a different fact from never asking, and a reader interpreting an `unknown` needs to know which one happened.
 
 Two things `--live` deliberately does not do. It does not average: **one unverified change denies `safe` to the whole plan**, because a plan is only as trustworthy as its least verified change. And existence alone is not a match — a resource that is present but shares no comparable attribute with recorded state stays `not_verified`.
 
-Azure today. The prober is an interface; adding a provider is about a hundred lines.
+Azure (`az`) and AWS (`aws cloudcontrol`) today, selected with `--live azure` / `--live aws`. Both probe generically rather than per resource type, so a new resource type needs no prober work. The prober is an interface; adding a provider is about a hundred lines.
 
 ## In CI
 
