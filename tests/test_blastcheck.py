@@ -66,7 +66,8 @@ def test_disk_grow_is_irreversible_from_plan_alone():
     m = _manifest("disk-grow.json")
     ch = _change(m, "azurerm_managed_disk.sql")
     assert ch["reversibility"]["value"] == "irreversible"
-    assert "cannot be shrunk" in ch["reversibility"]["cost"]
+    assert "cannot be reduced" in ch["reversibility"]["cost"]
+    assert "shrinking a managed disk" in ch["reversibility"]["rationale"]
     assert ch["availability_impact"]["value"] == "unknown"
     assert ch["severity"] == "unknown"
 
@@ -180,7 +181,9 @@ def test_every_change_is_assessed_even_without_a_precise_rule():
     # The manifest still says HOW each verdict was reached.
     depth = m["extensions"]["assessment"]
     assert depth["azurerm_managed_disk.data"] == "precise"
-    assert depth["azurerm_resource_group.rg"] == "structural"
+    # azurerm_resource_group is in the azurerm pack as stateless, so it is
+    # precisely classified too — that is the packs doing their job.
+    assert depth["azurerm_resource_group.rg"] == "precise"
     assert "skipped" not in m.get("extensions", {})
 
 
@@ -297,38 +300,60 @@ def test_errored_and_incomplete_plans_are_flagged():
 
 # ── Layer 0 and Layer 1: providers with no precise rules ─────────────────────
 
-def test_aws_and_gcp_are_assessed_without_provider_rules():
-    """blastcheck has no AWS or GCP rules at all. It must still produce useful
-    output, because 'no supported resource changes found' on a real plan is a
-    useless answer however correct the tool is about plans it does understand."""
+def test_a_multi_provider_plan_is_fully_assessed():
+    """AWS via its pack, Google via heuristics alone. Both produce findings."""
     m = _manifest("aws-no-precise-rules.json")
     assert len(m["changes"]) == 8
-    assert all(v != "precise" for v in m["extensions"]["assessment"].values())
     assert not sorted(VALIDATOR.iter_errors(m), key=str)
+    depth = m["extensions"]["assessment"]
+    assert depth["aws_db_instance.prod"] == "precise"          # in the aws pack
+    assert depth["google_sql_database_instance.main"] != "precise"   # no google pack
 
 
-def test_heuristic_findings_are_marked_as_guesses():
-    """A pattern match must be visibly a pattern match: low confidence, evidence
-    tagged `heuristic`, and severity `caution` rather than `blocking`. Grading a
-    guess as blocking is how a tool teaches people to ignore it."""
+def test_pack_findings_are_determinations_not_guesses():
+    """A pack is an assertion by someone who knows the provider, so its findings
+    carry high confidence and may be graded blocking — unlike Layer 1."""
     m = _manifest("aws-no-precise-rules.json")
     ch = _change(m, "aws_db_instance.prod")
     sp = ch["security_posture"]
     assert sp["value"] == "widened"
-    assert sp["confidence"] == "low"
-    assert ch["severity"] == "caution"
+    assert sp["confidence"] == "high"
+    assert ch["severity"] == "blocking"
     details = " ".join(c["detail"] for c in sp["concerns"])
-    assert "publicly_accessible" in details
-    assert "storage_encrypted" in details
-    assert "skip_final_snapshot" in details
+    assert "public internet" in details          # publicly_accessible
+    assert "encryption disabled" in details      # storage_encrypted
+    assert "final snapshot" in details           # skip_final_snapshot
+    assert any(e["source"] == "policy" for e in m["evidence"])
+
+
+def test_a_provider_with_no_pack_still_gets_heuristics():
+    """Google has no pack. deletion_protection going false is still caught, by
+    attribute-name pattern, and correctly marked as a guess."""
+    m = _manifest("aws-no-precise-rules.json")
+    ch = _change(m, "google_sql_database_instance.main")
+    assert ch["security_posture"]["confidence"] == "low"
+    assert ch["severity"] == "caution"
+    assert "deletion_protection" in " ".join(c["detail"] for c in ch["security_posture"]["concerns"])
     assert any(e["source"] == "heuristic" for e in m["evidence"])
 
 
-def test_public_acl_and_force_destroy_are_caught_generically():
+def test_public_acl_and_force_destroy_are_caught():
     m = _manifest("aws-no-precise-rules.json")
-    details = " ".join(c["detail"] for c in
-                       _change(m, "aws_s3_bucket.public_data")["security_posture"]["concerns"])
-    assert "public-read" in details and "force_destroy" in details
+    ch = _change(m, "aws_s3_bucket.public_data")
+    details = " ".join(c["detail"] for c in ch["security_posture"]["concerns"])
+    assert "ACL grants public access" in details
+    assert "force_destroy" in details
+    assert ch["security_posture"]["confidence"] == "high"
+
+
+def test_knowing_a_type_better_never_means_checking_it_less():
+    """REGRESSION. Adding aws_security_group_rule to a pack put it in PRECISE,
+    which had gated the heuristic layer — silently disabling the open-CIDR check
+    for it, because that check is algorithmic and lives in code, not the pack."""
+    m = _manifest("aws-no-precise-rules.json")
+    ch = _change(m, "aws_security_group_rule.ssh_in")
+    assert ch["security_posture"]["value"] == "widened"
+    assert "whole internet" in " ".join(c["detail"] for c in ch["security_posture"]["concerns"])
 
 
 def test_inbound_open_cidr_flagged_outbound_and_routes_are_not():

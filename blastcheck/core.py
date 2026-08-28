@@ -41,32 +41,27 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from .packs import load_packs
+
 SCHEMA_VERSION = "0.1.0"
-PRODUCER_VERSION = "0.4.0"
+PRODUCER_VERSION = "0.5.0"
 
 # Plan JSON format versions this tool has been exercised against. Terraform 0.12
 # emitted "0.1"; 1.x emits "1.x". Reading an unrecognised major without saying so
 # is the same class of mistake as reading an unreadable field as absent.
 _KNOWN_FORMAT_MAJORS = {"0", "1"}
 
-# ── Layer 2: precise Azure rules ─────────────────────────────────────────────
-_DATA_BEARING = {
-    "azurerm_managed_disk",
-    "azurerm_storage_account",
-    "azurerm_mssql_database",
-    "azurerm_sql_database",
-}
-_STATELESS = {
-    "azurerm_network_security_group",
-    "azurerm_network_security_rule",
-}
-_VM_TYPES = {
-    "azurerm_linux_virtual_machine",
-    "azurerm_windows_virtual_machine",
-    "azurerm_virtual_machine",
-}
-PRECISE = _DATA_BEARING | _STATELESS | _VM_TYPES
-SUPPORTED = PRECISE  # retained name; every change is now assessed, see below
+# ── Layer 2: precise rules, loaded from provider packs ───────────────────────
+#
+# These used to be nine hardcoded Azure type names. They are now data files, so
+# a contributor who knows a provider can add real precision without reading this
+# module. See packs.py for why, and blastcheck/packs/*.json for the content.
+PACK = load_packs()
+_DATA_BEARING = PACK.data_bearing
+_STATELESS = PACK.stateless
+_VM_TYPES = PACK.compute
+PRECISE = PACK.precise
+SUPPORTED = PRECISE  # retained name; every change is assessed regardless
 
 # Sources that count as "the whole internet" for an inbound-allow rule.
 _OPEN_SOURCES = {"*", "0.0.0.0/0", "internet", "any"}
@@ -281,7 +276,23 @@ def _reversibility(action: str, rtype: str, before: dict, after: dict,
         return {"value": "reversible", "mechanism": "destroy the newly-created resource",
                 "window": "until other changes depend on it", "cost": "none — nothing exists yet to lose",
                 "confidence": "high", "rationale": "A create is undone by a delete.", "evidence": ev}
-    # A managed-disk grow is a real plan-derivable irreversibility: Azure cannot shrink a disk.
+    # One-way growth: an attribute that can be increased but never decreased.
+    # Which attribute, on which type, and why, all come from the provider pack.
+    one_way = PACK.one_way_attribute(rtype)
+    if one_way and action == "update":
+        for attr, reason in one_way.items():
+            why = _unresolved(attr, unknown, sensitive)
+            if why:
+                return {"value": "unknown", "cost": "unknown", "confidence": "low",
+                        "rationale": f"Cannot determine whether `{attr}` increased: it is {why}. "
+                                     f"{reason.capitalize()}, so this is not assumed reversible.",
+                        "evidence": ev}
+            b, a = before.get(attr), after.get(attr)
+            if isinstance(b, (int, float)) and isinstance(a, (int, float)) and a > b:
+                return {"value": "irreversible",
+                        "cost": f"`{attr}` {int(b)} -> {int(a)} cannot be reduced; permanent",
+                        "confidence": "high", "rationale": reason, "evidence": ev}
+
     if rtype == "azurerm_managed_disk" and action == "update":
         # The size is frequently a variable or a computed value, in which case
         # the plan carries no number at all. Answering "reversible" there would
@@ -462,16 +473,27 @@ def _security(action: str, rtype: str, before: dict, after: dict,
             extra_ev.append(_ev(ev_id, "change.after: public access / TLS / network_rules settings",
                                  "; ".join(c["detail"] for c in concerns)))
 
+    # Declarative pack rules. Same standing as the hand-written rules above:
+    # someone who knows the provider asserted these, so they are `high`
+    # confidence and may be graded blocking. Layer 1 guesses may not.
+    pack_hits = PACK.exposure_findings(rtype, before, after)
+    if pack_hits:
+        concerns.extend(pack_hits)
+        extra_ev.append(_ev(ev_id, f"change.after vs change.before: {rtype} pack rules",
+                             "; ".join(h["detail"] for h in pack_hits), source="policy"))
+
     if concerns:
         return ({"value": "widened", "concerns": concerns, "confidence": "high",
                  "rationale": "The plan's after-state widens exposure or weakens a control (see concerns).",
                  "evidence": [base + "-plan", ev_id]}, extra_ev)
 
-    # Layer 1. Only reached when no precise rule fired, so a precise `unchanged`
-    # is never overridden by a guess. Confidence is low and the evidence is
-    # tagged `heuristic`: this is pattern matching on attribute names, and a
-    # reader is entitled to know that is all it is.
-    if rtype not in PRECISE:
+    # Layer 1. Reached only when the precise and pack layers found NOTHING, so a
+    # determination is never overridden by a guess — but reached for every type,
+    # including precisely-known ones. Gating this on "unknown type" was a bug:
+    # putting aws_security_group_rule into a pack silently disabled the open-CIDR
+    # check for it, because that check is algorithmic and lives here rather than
+    # in the pack. Knowing a type better must never mean checking it less.
+    if True:
         guesses = _heuristic_exposure(action, before, after)
         if guesses:
             h_id = f"{base}-heur"
@@ -741,9 +763,54 @@ def _live_availability(obs: Any, action: str, ev: List[str]) -> Optional[Dict[st
     return None
 
 
+def _live_recovery(rec: Any, action: str, rtype: str, base: str,
+                   ev: List[str]) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], List[dict]]:
+    """Reversibility and data durability from a recovery-point lookup.
+
+    Returns (reversibility, data_durability, evidence), each None where the
+    lookup settles nothing. This is the pair of dimensions a plan can never
+    answer: whether destroying something is survivable depends entirely on
+    whether a restorable copy exists right now."""
+    if rec is None or action not in ("delete", "replace"):
+        return None, None, []
+    ev_id = f"{base}-recovery"
+    if not getattr(rec, "usable", False):
+        # Not checked is not the same as no backup, and must never read as one.
+        return None, None, [_ev(ev_id, "recovery-point lookup",
+                                rec.error or "not attempted", source="live_state")]
+
+    if rec.found:
+        n = (rec.attributes or {}).get("count", 1)
+        names = [s.get("name") for s in (rec.attributes or {}).get("snapshots", []) if isinstance(s, dict)]
+        detail = f"{n} recovery point(s) exist" + (f" (e.g. {names[0]})" if names else "")
+        return ({"value": "reversible_with_data_loss",
+                 "mechanism": "restore from the most recent recovery point",
+                 "window": "bounded by the age of that recovery point",
+                 "cost": "everything written since the recovery point was taken is lost",
+                 "confidence": "high",
+                 "rationale": f"A live lookup found {detail}. The resource is restorable, but a restore "
+                              "is not free: a technically reversible change can still be an operational "
+                              "disaster if the recovery point is old.",
+                 "evidence": ev},
+                {"value": "recoverable_loss", "confidence": "high",
+                 "rationale": f"A live lookup found {detail}, so the data is recoverable rather than "
+                              "permanently lost.", "evidence": ev},
+                [_ev(ev_id, "recovery-point lookup", detail, source="live_state")])
+
+    return ({"value": "irreversible", "cost": "no recovery point exists to restore from",
+             "confidence": "high",
+             "rationale": "A live lookup found no recovery point for this resource. Destroying it "
+                          "cannot be undone.", "evidence": ev},
+            {"value": "unrecoverable_loss",
+             "at_risk": [f"all data held by {rtype}"], "confidence": "high",
+             "rationale": "A live lookup confirmed no snapshot or backup exists. This is permanent.",
+             "evidence": ev},
+            [_ev(ev_id, "recovery-point lookup", "no recovery point found", source="live_state")])
+
+
 def analyze_change(index: int, rc: Dict[str, Any],
                    drift: Optional[Dict[str, Any]] = None,
-                   obs: Any = None) -> Tuple[Dict[str, Any], List[dict]]:
+                   obs: Any = None, rec: Any = None) -> Tuple[Dict[str, Any], List[dict]]:
     addr = str(rc.get("address", ""))
     rtype = str(rc.get("type", ""))
     change = rc.get("change") or {}
@@ -797,10 +864,12 @@ def analyze_change(index: int, rc: Dict[str, Any],
     evidence.extend(state_ev)
 
     live_av = _live_availability(obs, action, plan_ref)
+    live_rev, live_dd, rec_ev = _live_recovery(rec, action, rtype, base, plan_ref)
+    evidence.extend(rec_ev)
     dims = {
         "availability_impact": live_av or _availability(action, plan_ref),
-        "reversibility": _reversibility(action, rtype, before, after, after_unknown, after_sensitive, plan_ref),
-        "data_durability": _data_durability(action, rtype, plan_ref),
+        "reversibility": live_rev or _reversibility(action, rtype, before, after, after_unknown, after_sensitive, plan_ref),
+        "data_durability": live_dd or _data_durability(action, rtype, plan_ref),
         "security_posture": sec_dim,
         "cost_delta": _cost(action, rtype, before, after, after_unknown, after_sensitive, plan_ref),
         "state_confidence": state_dim,
@@ -884,7 +953,8 @@ def _live_access(observations: Optional[Dict[str, Any]]) -> str:
 # ── Top-level: plan -> manifest ──────────────────────────────────────────────
 
 def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None,
-                   observations: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                   observations: Optional[Dict[str, Any]] = None,
+                   recovery: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     now = now or datetime.now(timezone.utc)
 
     # Terraform's refresh findings, keyed by address. See _state_confidence().
@@ -917,7 +987,8 @@ def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None,
     for i, rc in enumerate(supported):
         addr_i = str(rc.get("address", ""))
         ch, ev = analyze_change(i, rc, drift_by_address.get(addr_i),
-                                (observations or {}).get(addr_i))
+                                (observations or {}).get(addr_i),
+                                (recovery or {}).get(addr_i))
         changes.append(ch)
         evidence.extend(ev)
 

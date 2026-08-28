@@ -36,7 +36,8 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-__all__ = ["Observation", "Prober", "AzureCliProber", "prober_for", "probe_plan"]
+__all__ = ["Observation", "Prober", "AzureCliProber", "AwsCliProber",
+           "prober_for", "probe_plan", "probe_recovery_plan"]
 
 # The only verbs any prober may invoke. A mutating verb cannot reach a
 # subprocess call because it is not in this set and the command builders below
@@ -83,6 +84,21 @@ class Prober:
 
     def probe(self, rc: Dict[str, Any]) -> Observation:  # pragma: no cover - interface
         raise NotImplementedError
+
+    def probe_recovery(self, rc: Dict[str, Any]) -> Observation:
+        """Does a restorable copy of this resource exist right now?
+
+        This is the question that decides whether a destroy is survivable, and
+        it is the one a plan can never answer. `found=True` means a recovery
+        point was located; `found=False` means the provider was asked and there
+        is none — a finding, not a failure. An error means it could not be
+        determined, which stays `unknown`.
+
+        Default is "not implemented for this provider", because a base class
+        that silently returned "no backup" would turn an unimplemented method
+        into a data-loss warning on every resource."""
+        return Observation(str(rc.get("address", "")),
+                           error="recovery-point lookup is not implemented for this provider")
 
 
 def _run(args: List[str], timeout: float) -> "tuple[int, str, str]":
@@ -156,8 +172,136 @@ class AzureCliProber(Prober):
                 attrs.setdefault(k, v)
         return Observation(addr, found=True, attributes=attrs)
 
+    def probe_recovery(self, rc_entry: Dict[str, Any]) -> Observation:
+        """Snapshots whose source is this resource.
 
-_PROBERS = {"azure": AzureCliProber}
+        Scoped to managed disks: `az snapshot list` carries `creationData
+        .sourceResourceId`, which is an exact link back rather than a name
+        guess. Other Azure services put recovery points in Recovery Services
+        vaults, which need the vault and resource group as inputs and cannot be
+        queried generically — so those honestly report that they were not
+        checked instead of implying no backup exists."""
+        addr = str(rc_entry.get("address", ""))
+        rtype = str(rc_entry.get("type", ""))
+        before = (rc_entry.get("change") or {}).get("before") or {}
+        rid = before.get("id") if isinstance(before, dict) else None
+        if rtype != "azurerm_managed_disk" or not rid:
+            return Observation(addr, error=f"no generic recovery-point lookup exists for `{rtype}`; "
+                                           "recoverability was not checked")
+        verb = "list"
+        assert verb in _READ_ONLY_VERBS
+        code, out, err = self._run(
+            ["az", "snapshot", verb, "--query",
+             f"[?creationData.sourceResourceId=='{rid}'].{{name:name,time:timeCreated}}",
+             "--output", "json"], self.timeout)
+        if code != 0:
+            return Observation(addr, error=(err or "az snapshot list failed").strip()[:200])
+        try:
+            snaps = json.loads(out or "[]")
+        except ValueError:
+            return Observation(addr, error="az returned output that was not JSON")
+        if not isinstance(snaps, list) or not snaps:
+            return Observation(addr, found=False)
+        return Observation(addr, found=True, attributes={"snapshots": snaps[:5],
+                                                         "count": len(snaps)})
+
+
+class AwsCliProber(Prober):
+    """Reads live AWS state through the operator's own `aws` session.
+
+    Uses the Cloud Control API (`aws cloudcontrol get-resource`), which is the
+    AWS analogue of `az resource show --ids`: one command that works across
+    resource types instead of a different `describe-*` per service. Without it
+    this would need a per-service implementation, which is the narrow-scope
+    problem the layered assessment already fixed once.
+
+    Cloud Control addresses resources by CloudFormation type name, which is not
+    derivable from the Terraform type by string munging — `aws_db_instance` is
+    `AWS::RDS::DBInstance`, not `AWS::Db::Instance`. So there is a table, and a
+    type not in it produces an honest "cannot look this up" rather than a guess
+    at a type name that would fail confusingly."""
+
+    name = "aws"
+
+    # Terraform type -> CloudFormation type. Deliberately partial: an absent
+    # entry is reported, never guessed.
+    CFN_TYPES = {
+        "aws_s3_bucket": "AWS::S3::Bucket",
+        "aws_ebs_volume": "AWS::EC2::Volume",
+        "aws_db_instance": "AWS::RDS::DBInstance",
+        "aws_rds_cluster": "AWS::RDS::DBCluster",
+        "aws_dynamodb_table": "AWS::DynamoDB::Table",
+        "aws_security_group": "AWS::EC2::SecurityGroup",
+        "aws_subnet": "AWS::EC2::Subnet",
+        "aws_vpc": "AWS::EC2::VPC",
+        "aws_instance": "AWS::EC2::Instance",
+        "aws_efs_file_system": "AWS::EFS::FileSystem",
+        "aws_ecr_repository": "AWS::ECR::Repository",
+        "aws_kms_key": "AWS::KMS::Key",
+        "aws_sqs_queue": "AWS::SQS::Queue",
+        "aws_lambda_function": "AWS::Lambda::Function",
+        "aws_cloudwatch_log_group": "AWS::Logs::LogGroup",
+        "aws_eks_cluster": "AWS::EKS::Cluster",
+        "aws_elasticache_replication_group": "AWS::ElastiCache::ReplicationGroup",
+        "aws_redshift_cluster": "AWS::Redshift::Cluster",
+        "aws_lb": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+        "aws_secretsmanager_secret": "AWS::SecretsManager::Secret",
+    }
+
+    def __init__(self, timeout: float = 20.0, runner=None):
+        self.timeout = timeout
+        self._run = runner or _run
+
+    def available(self) -> Optional[str]:
+        if shutil.which("aws") is None:
+            return "the `aws` CLI is not installed or not on PATH"
+        rc, out, err = self._run(["aws", "sts", "get-caller-identity", "--output", "json"],
+                                 self.timeout)
+        if rc != 0:
+            return "the `aws` CLI has no usable credentials (`aws configure`, SSO, or a role)"
+        return None
+
+    def probe(self, rc_entry: Dict[str, Any]) -> Observation:
+        addr = str(rc_entry.get("address", ""))
+        rtype = str(rc_entry.get("type", ""))
+        before = (rc_entry.get("change") or {}).get("before") or {}
+        ident = before.get("id") if isinstance(before, dict) else None
+        if not ident:
+            return Observation(addr, error="no resource id in the plan's prior state, so there is "
+                                           "nothing to look up (this is normal for a create)")
+        cfn = self.CFN_TYPES.get(rtype)
+        if not cfn:
+            return Observation(addr, error=f"no Cloud Control type mapping is known for `{rtype}`, "
+                                           "so it cannot be looked up generically")
+
+        verb = "get"
+        assert f"{verb}-resource".startswith(tuple(_READ_ONLY_VERBS))
+        code, out, err = self._run(
+            ["aws", "cloudcontrol", f"{verb}-resource", "--type-name", cfn,
+             "--identifier", str(ident), "--output", "json"], self.timeout)
+        if code == 124:
+            return Observation(addr, error=err)
+        if code != 0:
+            low = (err or "").lower()
+            if "resourcenotfound" in low or "not found" in low or "does not exist" in low:
+                return Observation(addr, found=False)
+            if "accessdenied" in low or "not authorized" in low or "unauthorized" in low:
+                return Observation(addr, error="the current AWS identity is not authorised to read "
+                                               "this resource")
+            return Observation(addr, error=(err or "aws cloudcontrol get-resource failed").strip()[:200])
+        try:
+            body = json.loads(out)
+            # Cloud Control returns Properties as a JSON *string* inside the response.
+            props = (body.get("ResourceDescription") or {}).get("Properties")
+            attrs = json.loads(props) if isinstance(props, str) else (props or {})
+            if not isinstance(attrs, dict):
+                raise ValueError("Properties was not an object")
+        except ValueError as e:
+            return Observation(addr, error=f"could not parse the Cloud Control response: {e}"[:200])
+        return Observation(addr, found=True, attributes=attrs)
+
+
+_PROBERS = {"azure": AzureCliProber, "aws": AwsCliProber}
 
 
 def prober_for(provider: str, timeout: float = 20.0) -> Prober:
@@ -165,6 +309,28 @@ def prober_for(provider: str, timeout: float = 20.0) -> Prober:
     if cls is None:
         raise ValueError(f"no live prober for {provider!r}; available: {', '.join(sorted(_PROBERS))}")
     return cls(timeout=timeout)
+
+
+def probe_recovery_plan(plan: Dict[str, Any], prober: Prober,
+                        limit: int = 200) -> Dict[str, Observation]:
+    """Recovery-point lookups, only for changes that actually destroy something.
+    Asking whether a backup exists for a resource being created is wasted API
+    calls and a slower pipeline for no information."""
+    out: Dict[str, Observation] = {}
+    n = 0
+    for rc in plan.get("resource_changes", []) or []:
+        acts = set((rc.get("change") or {}).get("actions") or [])
+        if not (acts & {"delete"}):
+            continue
+        if n >= limit:
+            break
+        addr = str(rc.get("address", ""))
+        try:
+            out[addr] = prober.probe_recovery(rc)
+        except Exception as e:
+            out[addr] = Observation(addr, error=f"recovery probe raised {type(e).__name__}: {e}"[:200])
+        n += 1
+    return out
 
 
 def probe_plan(plan: Dict[str, Any], prober: Prober,

@@ -272,3 +272,128 @@ def test_no_mutating_verb_can_reach_a_command():
     for args in seen:
         assert set(args) & _READ_ONLY_VERBS, f"no read-only verb in {args}"
         assert not (set(args) & {"delete", "create", "update", "set", "remove"})
+
+
+# ── Recovery points: the question a plan can never answer ────────────────────
+
+def test_no_recovery_point_makes_a_delete_unrecoverable():
+    """The whole reason to ask a cloud anything. A destroy with no snapshot is
+    not `unknown`, it is permanent — and that is a determination, not a guess."""
+    rec = Observation("azurerm_managed_disk.d", found=False)
+    m = build_manifest(_plan(actions=["delete"], after=None),
+                       recovery={"azurerm_managed_disk.d": rec})
+    ch = m["changes"][0]
+    assert ch["reversibility"]["value"] == "irreversible"
+    assert ch["data_durability"]["value"] == "unrecoverable_loss"
+    assert ch["data_durability"]["confidence"] == "high"
+    assert ch["severity"] == "blocking"
+    assert m["verdict"]["decision"] == "blocked"
+
+
+def test_a_recovery_point_makes_it_recoverable_but_not_free():
+    """`reversible_with_data_loss`, not `reversible`. Restoring a 14-hour-old
+    snapshot is technically reversible and operationally a disaster, and the
+    format has a distinct value for exactly that."""
+    rec = Observation("azurerm_managed_disk.d", found=True,
+                      attributes={"count": 3, "snapshots": [{"name": "snap-nightly"}]})
+    m = build_manifest(_plan(actions=["delete"], after=None),
+                       recovery={"azurerm_managed_disk.d": rec})
+    ch = m["changes"][0]
+    assert ch["reversibility"]["value"] == "reversible_with_data_loss"
+    assert "snap-nightly" in ch["reversibility"]["rationale"]
+    assert ch["data_durability"]["value"] == "recoverable_loss"
+
+
+def test_an_unchecked_recovery_lookup_never_reads_as_no_backup():
+    """The dangerous confusion. 'I did not look' must not become 'there is no
+    backup', which would turn an unimplemented lookup into a false alarm on
+    every resource."""
+    rec = Observation("azurerm_managed_disk.d",
+                      error="no generic recovery-point lookup exists for `azurerm_managed_disk`")
+    m = build_manifest(_plan(actions=["delete"], after=None),
+                       recovery={"azurerm_managed_disk.d": rec})
+    ch = m["changes"][0]
+    assert ch["data_durability"]["value"] == "unknown"
+    assert ch["reversibility"]["value"] == "unknown"
+
+
+def test_recovery_is_only_probed_for_destructive_changes():
+    """Asking whether a backup exists for a resource being created is wasted API
+    calls and a slower pipeline for no information."""
+    from blastcheck.live import probe_recovery_plan
+    asked = []
+    class Spy(Prober):
+        name = "spy"
+        def available(self): return None
+        def probe_recovery(self, rc):
+            asked.append(rc["address"])
+            return Observation(rc["address"], found=False)
+    plan = load_plan(json.dumps({"format_version": "1.2", "resource_changes": [
+        {"address": "a.create", "type": "azurerm_managed_disk", "name": "c",
+         "change": {"actions": ["create"], "before": None, "after": {}}},
+        {"address": "a.destroy", "type": "azurerm_managed_disk", "name": "d",
+         "change": {"actions": ["delete"], "before": {"id": DISK_ID}, "after": None}},
+    ]}))
+    probe_recovery_plan(plan, Spy())
+    assert asked == ["a.destroy"]
+
+
+def test_base_prober_reports_recovery_as_unimplemented_not_absent():
+    o = Prober().probe_recovery({"address": "x"})
+    assert not o.usable and "not implemented" in o.error
+
+
+def test_azure_recovery_finds_snapshots_by_source_id():
+    snaps = json.dumps([{"name": "snap-1", "time": "2026-08-01T00:00:00Z"}])
+    p = AzureCliProber(runner=_fake_az([("snapshot list", (0, snaps, ""))]))
+    o = p.probe_recovery({"address": "a", "type": "azurerm_managed_disk",
+                          "change": {"before": {"id": DISK_ID}}})
+    assert o.usable and o.found is True and o.attributes["count"] == 1
+
+
+def test_azure_recovery_declines_types_it_cannot_query_generically():
+    """Recovery Services vaults need the vault and resource group as inputs.
+    Saying so is better than implying no backup exists."""
+    p = AzureCliProber(runner=_fake_az([]))
+    o = p.probe_recovery({"address": "a", "type": "azurerm_mssql_database",
+                          "change": {"before": {"id": "x"}}})
+    assert not o.usable and "no generic recovery-point lookup" in o.error
+
+
+# ── The AWS prober ───────────────────────────────────────────────────────────
+
+def test_aws_prober_parses_cloud_control_properties():
+    """Cloud Control returns Properties as a JSON *string* inside the response,
+    which is easy to miss and yields an empty attribute set if you do."""
+    from blastcheck.live import AwsCliProber
+    body = json.dumps({"ResourceDescription": {
+        "Identifier": "my-bucket",
+        "Properties": json.dumps({"BucketName": "my-bucket", "VersioningConfiguration": {}})}})
+    p = AwsCliProber(runner=_fake_az([("cloudcontrol", (0, body, ""))]))
+    o = p.probe({"address": "a", "type": "aws_s3_bucket",
+                 "change": {"before": {"id": "my-bucket"}}})
+    assert o.usable and o.attributes["BucketName"] == "my-bucket"
+
+
+def test_aws_prober_refuses_to_guess_a_cloudformation_type():
+    """`aws_db_instance` is AWS::RDS::DBInstance, not AWS::Db::Instance. String
+    munging would produce a confusing API error instead of a clear message."""
+    from blastcheck.live import AwsCliProber
+    p = AwsCliProber(runner=_fake_az([]))
+    o = p.probe({"address": "a", "type": "aws_wildly_obscure_thing",
+                 "change": {"before": {"id": "x"}}})
+    assert not o.usable and "no Cloud Control type mapping" in o.error
+
+
+def test_aws_prober_distinguishes_missing_from_denied():
+    from blastcheck.live import AwsCliProber
+    gone = AwsCliProber(runner=_fake_az([("cloudcontrol", (1, "", "ResourceNotFoundException"))]))
+    denied = AwsCliProber(runner=_fake_az([("cloudcontrol", (1, "", "AccessDeniedException"))]))
+    rc = {"address": "a", "type": "aws_s3_bucket", "change": {"before": {"id": "b"}}}
+    assert gone.probe(rc).found is False
+    assert denied.probe(rc).found is None and "not authorised" in denied.probe(rc).error
+
+
+def test_both_probers_are_selectable():
+    assert prober_for("aws").name == "aws"
+    assert prober_for("azure").name == "azure"

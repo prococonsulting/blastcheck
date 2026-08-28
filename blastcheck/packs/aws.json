@@ -1,0 +1,164 @@
+{
+  "provider": "aws",
+  "pack_version": "1",
+  "data_bearing": [
+    "aws_s3_bucket",
+    "aws_ebs_volume",
+    "aws_ebs_snapshot",
+    "aws_db_instance",
+    "aws_db_cluster_snapshot",
+    "aws_rds_cluster",
+    "aws_rds_cluster_instance",
+    "aws_dynamodb_table",
+    "aws_elasticache_cluster",
+    "aws_elasticache_replication_group",
+    "aws_redshift_cluster",
+    "aws_efs_file_system",
+    "aws_fsx_lustre_file_system",
+    "aws_docdb_cluster",
+    "aws_neptune_cluster",
+    "aws_timestreamwrite_table",
+    "aws_ecr_repository",
+    "aws_secretsmanager_secret",
+    "aws_ssm_parameter",
+    "aws_kms_key",
+    "aws_glacier_vault",
+    "aws_backup_vault",
+    "aws_cloudwatch_log_group",
+    "aws_sqs_queue",
+    "aws_kinesis_stream"
+  ],
+  "stateless": [
+    "aws_security_group",
+    "aws_security_group_rule",
+    "aws_vpc_security_group_ingress_rule",
+    "aws_vpc_security_group_egress_rule",
+    "aws_route_table",
+    "aws_route",
+    "aws_route_table_association",
+    "aws_subnet",
+    "aws_vpc",
+    "aws_internet_gateway",
+    "aws_nat_gateway",
+    "aws_network_acl",
+    "aws_eip",
+    "aws_lb",
+    "aws_lb_listener",
+    "aws_lb_target_group",
+    "aws_iam_role",
+    "aws_iam_policy",
+    "aws_iam_role_policy_attachment",
+    "aws_iam_instance_profile",
+    "aws_db_subnet_group",
+    "aws_db_parameter_group",
+    "aws_db_option_group",
+    "aws_elasticache_subnet_group",
+    "aws_cloudwatch_metric_alarm"
+  ],
+  "compute": [
+    "aws_instance",
+    "aws_autoscaling_group",
+    "aws_launch_template",
+    "aws_ecs_service",
+    "aws_ecs_cluster",
+    "aws_eks_cluster",
+    "aws_eks_node_group",
+    "aws_lambda_function",
+    "aws_batch_compute_environment"
+  ],
+  "one_way_growth": {
+    "aws_ebs_volume": {
+      "size": "an EBS volume can be grown but never shrunk, so the size increase is one-way"
+    },
+    "aws_db_instance": {
+      "allocated_storage": "RDS allocated storage can be increased but never decreased, so the change is one-way"
+    },
+    "aws_rds_cluster": {
+      "allocated_storage": "RDS cluster allocated storage can be increased but never decreased"
+    }
+  },
+  "exposure": {
+    "aws_s3_bucket": [
+      {"attribute": "acl", "when_contains": "public", "kind": "exposure",
+       "detail": "bucket ACL grants public access"},
+      {"attribute": "force_destroy", "when_true": true, "kind": "audit",
+       "detail": "force_destroy enabled, so `terraform destroy` will delete this bucket even when it still holds objects"}
+    ],
+    "aws_s3_bucket_public_access_block": [
+      {"attribute": "block_public_acls", "when_false": true, "kind": "exposure",
+       "detail": "public ACLs are no longer blocked"},
+      {"attribute": "block_public_policy", "when_false": true, "kind": "exposure",
+       "detail": "public bucket policies are no longer blocked"},
+      {"attribute": "ignore_public_acls", "when_false": true, "kind": "exposure",
+       "detail": "public ACLs are no longer ignored"},
+      {"attribute": "restrict_public_buckets", "when_false": true, "kind": "exposure",
+       "detail": "public bucket restriction removed"}
+    ],
+    "aws_db_instance": [
+      {"attribute": "publicly_accessible", "when_true": true, "kind": "exposure",
+       "detail": "the database is reachable from the public internet"},
+      {"attribute": "storage_encrypted", "when_false": true, "kind": "identity",
+       "detail": "storage encryption disabled"},
+      {"attribute": "skip_final_snapshot", "when_true": true, "kind": "audit",
+       "detail": "no final snapshot will be taken on destroy, so the data is unrecoverable afterwards"},
+      {"attribute": "deletion_protection", "when_false": true, "kind": "audit",
+       "detail": "deletion protection disabled"},
+      {"attribute": "iam_database_authentication_enabled", "when_false": true, "kind": "identity",
+       "detail": "IAM database authentication disabled"}
+    ],
+    "aws_rds_cluster": [
+      {"attribute": "storage_encrypted", "when_false": true, "kind": "identity",
+       "detail": "cluster storage encryption disabled"},
+      {"attribute": "skip_final_snapshot", "when_true": true, "kind": "audit",
+       "detail": "no final snapshot will be taken on destroy"},
+      {"attribute": "deletion_protection", "when_false": true, "kind": "audit",
+       "detail": "deletion protection disabled"}
+    ],
+    "aws_neptune_cluster": [
+      {"attribute": "storage_encrypted", "when_false": true, "kind": "identity",
+       "detail": "cluster storage encryption disabled"},
+      {"attribute": "skip_final_snapshot", "when_true": true, "kind": "audit",
+       "detail": "no final snapshot will be taken on destroy"}
+    ],
+    "aws_docdb_cluster": [
+      {"attribute": "storage_encrypted", "when_false": true, "kind": "identity",
+       "detail": "cluster storage encryption disabled"},
+      {"attribute": "skip_final_snapshot", "when_true": true, "kind": "audit",
+       "detail": "no final snapshot will be taken on destroy"}
+    ],
+    "aws_ebs_volume": [
+      {"attribute": "encrypted", "when_false": true, "kind": "identity",
+       "detail": "volume encryption disabled"}
+    ],
+    "aws_efs_file_system": [
+      {"attribute": "encrypted", "when_false": true, "kind": "identity",
+       "detail": "file system encryption disabled"}
+    ],
+    "aws_dynamodb_table": [
+      {"attribute": "deletion_protection_enabled", "when_false": true, "kind": "audit",
+       "detail": "table deletion protection disabled"}
+    ],
+    "aws_subnet": [
+      {"attribute": "map_public_ip_on_launch", "when_true": true, "kind": "exposure",
+       "detail": "instances launched in this subnet receive a public IP automatically"}
+    ],
+    "aws_eks_cluster": [
+      {"attribute": "endpoint_public_access", "when_true": true, "kind": "exposure",
+       "detail": "the EKS API server endpoint is publicly reachable"}
+    ],
+    "aws_ecr_repository": [
+      {"attribute": "force_delete", "when_true": true, "kind": "audit",
+       "detail": "force_delete enabled, so the repository will be destroyed even when it still holds images"}
+    ],
+    "aws_kms_key": [
+      {"attribute": "enable_key_rotation", "when_false": true, "kind": "identity",
+       "detail": "automatic key rotation disabled"}
+    ],
+    "aws_redshift_cluster": [
+      {"attribute": "publicly_accessible", "when_true": true, "kind": "exposure",
+       "detail": "the cluster is reachable from the public internet"},
+      {"attribute": "encrypted", "when_false": true, "kind": "identity",
+       "detail": "cluster encryption disabled"}
+    ]
+  }
+}

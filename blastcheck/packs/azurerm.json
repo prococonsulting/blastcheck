@@ -1,0 +1,109 @@
+{
+  "provider": "azurerm",
+  "pack_version": "1",
+  "data_bearing": [
+    "azurerm_managed_disk",
+    "azurerm_storage_account",
+    "azurerm_storage_container",
+    "azurerm_storage_share",
+    "azurerm_mssql_database",
+    "azurerm_sql_database",
+    "azurerm_mssql_managed_database",
+    "azurerm_postgresql_flexible_server",
+    "azurerm_mysql_flexible_server",
+    "azurerm_cosmosdb_account",
+    "azurerm_cosmosdb_sql_database",
+    "azurerm_key_vault",
+    "azurerm_key_vault_secret",
+    "azurerm_key_vault_key",
+    "azurerm_redis_cache",
+    "azurerm_container_registry",
+    "azurerm_netapp_volume",
+    "azurerm_data_lake_store",
+    "azurerm_eventhub",
+    "azurerm_servicebus_queue",
+    "azurerm_log_analytics_workspace",
+    "azurerm_recovery_services_vault"
+  ],
+  "stateless": [
+    "azurerm_network_security_group",
+    "azurerm_network_security_rule",
+    "azurerm_route_table",
+    "azurerm_route",
+    "azurerm_resource_group",
+    "azurerm_subnet",
+    "azurerm_virtual_network",
+    "azurerm_public_ip",
+    "azurerm_network_interface",
+    "azurerm_lb",
+    "azurerm_lb_rule",
+    "azurerm_application_security_group",
+    "azurerm_role_assignment",
+    "azurerm_management_lock",
+    "azurerm_monitor_diagnostic_setting"
+  ],
+  "compute": [
+    "azurerm_linux_virtual_machine",
+    "azurerm_windows_virtual_machine",
+    "azurerm_virtual_machine",
+    "azurerm_virtual_machine_scale_set",
+    "azurerm_linux_virtual_machine_scale_set",
+    "azurerm_windows_virtual_machine_scale_set",
+    "azurerm_kubernetes_cluster",
+    "azurerm_kubernetes_cluster_node_pool",
+    "azurerm_app_service",
+    "azurerm_linux_web_app",
+    "azurerm_windows_web_app",
+    "azurerm_container_group"
+  ],
+  "one_way_growth": {
+    "azurerm_managed_disk": {
+      "disk_size_gb": "Azure does not support shrinking a managed disk, so the size increase is one-way"
+    },
+    "azurerm_netapp_volume": {
+      "storage_quota_in_gb": "an Azure NetApp volume quota increase cannot be reduced below the used capacity and is treated as one-way"
+    }
+  },
+  "exposure": {
+    "azurerm_storage_account": [
+      {"attribute": "public_network_access_enabled", "when_true": true, "kind": "exposure",
+       "detail": "public network access enabled on the storage account"},
+      {"attribute": "allow_nested_items_to_be_public", "when_true": true, "kind": "exposure",
+       "detail": "blob/container public access allowed"},
+      {"attribute": "min_tls_version", "when_decreases": true, "kind": "identity",
+       "detail": "minimum TLS version lowered"},
+      {"attribute": "shared_access_key_enabled", "when_true": true, "kind": "identity",
+       "detail": "shared access keys enabled, weakening identity-based access control"},
+      {"attribute": "https_traffic_only_enabled", "when_false": true, "kind": "identity",
+       "detail": "HTTPS-only traffic disabled, permitting plaintext access"}
+    ],
+    "azurerm_key_vault": [
+      {"attribute": "purge_protection_enabled", "when_false": true, "kind": "audit",
+       "detail": "purge protection disabled, so a deleted vault and its secrets can be permanently destroyed"},
+      {"attribute": "public_network_access_enabled", "when_true": true, "kind": "exposure",
+       "detail": "public network access enabled on the key vault"}
+    ],
+    "azurerm_mssql_server": [
+      {"attribute": "public_network_access_enabled", "when_true": true, "kind": "exposure",
+       "detail": "public network access enabled on the SQL server"},
+      {"attribute": "minimum_tls_version", "when_decreases": true, "kind": "identity",
+       "detail": "minimum TLS version lowered"}
+    ],
+    "azurerm_cosmosdb_account": [
+      {"attribute": "public_network_access_enabled", "when_true": true, "kind": "exposure",
+       "detail": "public network access enabled on the Cosmos DB account"}
+    ],
+    "azurerm_kubernetes_cluster": [
+      {"attribute": "private_cluster_enabled", "when_false": true, "kind": "exposure",
+       "detail": "the AKS API server is no longer private"},
+      {"attribute": "role_based_access_control_enabled", "when_false": true, "kind": "identity",
+       "detail": "Kubernetes RBAC disabled"}
+    ],
+    "azurerm_container_registry": [
+      {"attribute": "public_network_access_enabled", "when_true": true, "kind": "exposure",
+       "detail": "public network access enabled on the container registry"},
+      {"attribute": "admin_enabled", "when_true": true, "kind": "identity",
+       "detail": "registry admin account enabled, creating a shared static credential"}
+    ]
+  }
+}

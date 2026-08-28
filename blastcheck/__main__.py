@@ -18,7 +18,7 @@ import json
 import sys
 
 from .canonical import CanonicalizationError, attach_integrity, verify_integrity
-from .live import probe_plan, prober_for
+from .live import probe_plan, probe_recovery_plan, prober_for
 from .core import build_manifest, load_plan, PlanError, PRODUCER_VERSION
 
 
@@ -80,6 +80,7 @@ def main(argv=None) -> int:
         return 1
 
     observations = None
+    recovery = None
     if args.live:
         try:
             prober = prober_for(args.live, timeout=args.live_timeout)
@@ -98,11 +99,16 @@ def main(argv=None) -> int:
         else:
             observations = probe_plan(plan, prober)
             usable = sum(1 for o in observations.values() if o.usable)
+            recovery = probe_recovery_plan(plan, prober)
+            checked = sum(1 for o in recovery.values() if o.usable)
             print(f"blastcheck: live read {usable}/{len(observations)} resource(s) via {prober.name}",
                   file=sys.stderr)
+            if recovery:
+                print(f"blastcheck: recovery points checked for {checked}/{len(recovery)} "
+                      "resource(s) being destroyed", file=sys.stderr)
 
     try:
-        manifest = build_manifest(plan, observations=observations)
+        manifest = build_manifest(plan, observations=observations, recovery=recovery)
     except PlanError as e:
         print(f"blastcheck: {e}", file=sys.stderr)
         return 1
