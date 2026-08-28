@@ -74,10 +74,10 @@ footer a{color:var(--muted)}
 <body>
 <div class="wrap">
 
-  <span class="pill">blastcheck 0.3 &middot; format 0.1 draft &middot; Apache-2.0</span>
+  <span class="pill">blastcheck 0.7 &middot; format 0.1 draft &middot; Apache-2.0</span>
   <h1>blastcheck</h1>
   <p class="lede">A Terraform plan tells you <em>what</em> will change. It does not tell you whether the change is <em>safe</em>.</p>
-  <p class="sub">blastcheck reads <code>terraform show -json</code> and emits an <a href="https://github.com/prococonsulting/impact-manifest">Impact Manifest</a>: a machine-readable change-safety assertion. Free, offline, no credentials, no hosted service.</p>
+  <p class="sub">blastcheck reads <code>terraform show -json</code> and emits an <a href="https://github.com/prococonsulting/impact-manifest">Impact Manifest</a>: a machine-readable change-safety assertion. Offline by default, no hosted service, and no runtime dependencies at all.</p>
 
   <hr class="rule">
 
@@ -90,9 +90,34 @@ footer a{color:var(--muted)}
 
   <h2>Install</h2>
 <pre><code>pip install blastcheck
+brew install prococonsulting/tap/blastcheck
+# or a single binary from Releases — no Python needed</code></pre>
 
-terraform plan -out tfplan
-terraform show -json tfplan | blastcheck &gt; manifest.json</code></pre>
+<pre><code>terraform plan -out tfplan
+terraform show -json tfplan | blastcheck &gt; manifest.json
+
+blastcheck plan.json      # readable summary
+blastcheck tfplan         # a saved binary plan, converted for you
+blastcheck rules          # what this build actually knows</code></pre>
+
+  <p><strong>On a terminal you get a summary; redirected or piped you get the manifest.</strong> No flag needed either way.</p>
+
+<pre><code>blastcheck 0.7.0 — 20 change(s) assessed, plan-only
+
+  BLOCKED  azurerm_network_security_group.web_tier
+           security      inline rule 'allow-ssh-temp': inbound Allow from ['*']
+                         to port(s) ['22'] — opens sensitive access to the internet
+
+  UNKNOWN  azurerm_managed_disk.sql_data
+           reversibility `disk_size_gb` 512 -&gt; 1024 cannot be reduced; permanent
+
+  6 further change(s) are undetermined only because live state was not queried.
+  3 change(s) had nothing to flag.
+
+verdict: blocked
+  · state was never verified against reality — re-run with --live to certify</code></pre>
+
+  <p>The baseline unknowns every plan-only change shares are summarised once rather than repeated per change, and a low-confidence finding is labelled <code>(pattern match, not a determination)</code> — so a guess never looks like a determination in a terminal.</p>
 
   <p>In a pull request:</p>
 <pre><code>- run: terraform show -json tfplan &gt; plan.json
@@ -116,8 +141,9 @@ terraform show -json tfplan | blastcheck &gt; manifest.json</code></pre>
     <tr><th>Layer</th><th>Applies to</th><th>Confidence</th></tr>
     <tr><td><strong>0 — structural</strong></td><td>any provider ever written: action semantics, <code>action_reason</code>, <code>replace_paths</code>, drift, unreadable fields</td><td>high</td></tr>
     <tr><td><strong>1 — heuristic</strong></td><td>any provider, by resource-type and attribute name and value patterns</td><td>low, tagged <code>heuristic</code></td></tr>
-    <tr><td><strong>2 — precise</strong></td><td>resource types with an exact rule (Azure disks, VMs, NSGs, storage, SQL today)</td><td>high</td></tr>
+    <tr><td><strong>2 — precise</strong></td><td>resource types with an exact rule — 110 types across AWS and Azure, declared in provider packs</td><td>high</td></tr>
   </table>
+  <p>Layer 2 is <em>data</em>, not code. A provider pack is a JSON file declaring which resource types are data-bearing, which are stateless, which attributes only grow in one direction, and which attribute values widen exposure. Adding a resource type is an edit to a data file with a test, not a change to the analyzer — which is the only version of this that a community can actually contribute to. <code>blastcheck rules</code> prints exactly what the installed build knows, so the coverage claim on this page is never the one you have to trust.</p>
   <p>On a real 55-change AWS plan, with no AWS-specific code at all, the heuristic layer finds a publicly accessible unencrypted database with final snapshots disabled, a public-read bucket, and a security group open to the internet.</p>
   <p>Those findings are graded <code>caution</code>, never <code>blocking</code>, and their evidence is tagged <code>source: heuristic</code>. They are leads, not determinations, and saying so is the difference between a tool people read and a tool people mute. For the same reason an open <em>egress</em> rule and a default route are not flagged: both are <code>0.0.0.0/0</code> by definition, and firing on them would trip on nearly every plan ever written.</p>
 
@@ -130,9 +156,38 @@ verdict: blocked</code></pre>
   <p>The plan is internally consistent. It reads as routine. It was computed against a description of that resource which had already stopped being true, and every other verdict for it was derived from the same stale state. <a href="/the-plan-was-right/">That is the outage this exists for.</a></p>
   <p>Two limits, stated rather than papered over. An <em>empty</em> <code>resource_drift</code> is ambiguous — it means either refresh found nothing or refresh did not run (<code>-refresh=false</code>), and the plan does not record which, so absence never earns <code>state_matches_reality</code>. And refresh only sees resources Terraform manages; anything created outside Terraform is not in state, so nothing refreshes it.</p>
 
-  <h2>Why it never says <code>safe</code></h2>
-  <p>blastcheck is offline by design. It never queries live cloud state, so it is not entitled to certify that a change is safe — it can only report <code>caution</code>, <code>blocked</code>, or <code>unknown</code>. That is not a limitation being apologised for. A tool that says <code>safe</code> when it means <em>I found no problem</em> converts an absence of information into a green light and puts someone's name on it.</p>
-  <p>A false <code>safe</code> is catastrophic. A false <code>unknown</code> is annoying. The format is built around that asymmetry.</p>
+  <h2>Why a plan alone never earns <code>safe</code></h2>
+  <p>A default run never queries live cloud state, so it is not entitled to certify that a change is safe. It reports <code>caution</code>, <code>blocked</code>, or <code>unknown</code> — never <code>safe</code>, no matter how clean the plan looks. That is not a limitation being apologised for. A tool that says <code>safe</code> when it means <em>I found no problem</em> converts an absence of information into a green light and puts someone's name on it.</p>
+  <p>A false <code>safe</code> is catastrophic. A false <code>unknown</code> is annoying. The format is built around that asymmetry, and <code>safe</code> is a positive claim that has to be earned with evidence rather than a default that survives because nothing tripped.</p>
+
+  <h2>Live checks: earning it</h2>
+<pre><code>blastcheck --plan plan.json --live &gt; manifest.json</code></pre>
+  <p><code>--live</code> verifies recorded state against live cloud reality, and it is the only mode in which a <code>safe</code> verdict is reachable at all.</p>
+
+  <div class="callout">
+    <p><strong>blastcheck never handles a credential.</strong> It shells out to the provider's own CLI and uses the session you already have — <code>az login</code>, SSO, managed identity, whatever your environment provides. Nothing is read from a config file, nothing is accepted as a flag, nothing is stored. A tool that asks you to hand it cloud credentials so it can tell you whether a change is safe has an obvious problem.</p>
+  </div>
+
+  <p>It also never writes. Every command is built from a fixed template with a read-only verb, and a test asserts that no mutating verb can reach a subprocess call.</p>
+
+  <table>
+    <tr><th></th><th>plan-only</th><th>with <code>--live</code></th></tr>
+    <tr><td><code>state_confidence</code></td><td><code>not_verified</code>, or <code>drift_detected</code> from Terraform's refresh</td><td><strong><code>state_matches_reality</code></strong>, or drift blastcheck found itself</td></tr>
+    <tr><td><code>availability_impact</code></td><td><code>unknown</code> for anything that already exists</td><td><code>interrupts</code> when something is attached to it</td></tr>
+    <tr><td><code>data_durability</code></td><td>a delete is <em>unverified</em> loss</td><td><code>unrecoverable_loss</code> when no recovery point exists — checked, not assumed</td></tr>
+    <tr><td>verdict</td><td>never <code>safe</code></td><td><code>safe</code> only when every change was verified and none is dangerous</td></tr>
+  </table>
+
+  <p>A failed probe — no CLI, not logged in, no permission, a timeout — does <em>not</em> degrade to a guess. The dimension stays <code>unknown</code>, the reason appears in the rationale, and <code>producer.access.live_state</code> records <code>unavailable</code> rather than <code>queried</code>. Asking and being refused is a different fact from never asking, and a reader interpreting an <code>unknown</code> needs to know which one happened.</p>
+  <p>Two things <code>--live</code> deliberately does not do. It does not average: <strong>one unverified change denies <code>safe</code> to the whole plan</strong>, because a plan is only as trustworthy as its least verified change. And existence alone is not a match — a resource that is present but shares no comparable attribute with recorded state stays <code>not_verified</code>.</p>
+
+  <h2>An ignore does not delete a finding</h2>
+  <p>A <code>.blastcheck.json</code> anywhere above your working directory sets defaults, including patterns to ignore:</p>
+<pre><code>{ "fail_on": "blocked", "live": "azure", "ignore": ["module.sandbox.*"] }</code></pre>
+  <p>An ignore lowers that change's severity to <code>informational</code> so it stops gating a pipeline. Everything else stays exactly as it was — the concerns, the rationale, the evidence — and the manifest records which pattern suppressed it under <code>extensions.ignored</code>, along with the severity it originally had. A config file that could make a finding <em>vanish</em> would be the most effective way yet invented to produce a false <code>safe</code>, and it would be invisible to whoever read the manifest afterwards.</p>
+
+  <h2>Producer, not a gate</h2>
+  <p>By default blastcheck emits the manifest and exits <code>0</code> whatever the verdict. <code>--fail-on</code> lets you state your own threshold — that is the operator declaring a policy, not the tool deciding one. Exit <code>1</code> means <em>blastcheck could not run</em> and exit <code>2</code> means <em>the verdict tripped your threshold</em>; they are deliberately distinct, because a pipeline must be able to tell "this plan is dangerous" from "the tool is broken", and those call for opposite responses.</p>
 
   <h2>Tamper-evident</h2>
 <pre><code>blastcheck --plan plan.json --sign &gt; manifest.json
@@ -157,7 +212,7 @@ blastcheck --verify manifest.json</code></pre>
   </div>
 
   <footer>
-    <p>Precise rules currently cover Azure managed disks, virtual machines, network security groups and rules, storage accounts and SQL databases. Every other resource type, on every other provider, is still assessed structurally and heuristically — <code>extensions.assessment</code> records which layer produced each verdict. The specification does not freeze at 1.0 until this tool has been run against real Terraform plans from more than one estate.</p>
+    <p>Precise rules currently cover 110 resource types across AWS and Azure; <code>blastcheck rules</code> prints the exact set your build has. Every other resource type, on every other provider, is still assessed structurally and heuristically — <code>extensions.assessment</code> records which layer produced each verdict. Live probing covers Azure and AWS today; the prober is an interface, and a provider is about a hundred lines. The specification does not freeze at 1.0 until this tool has been run against real Terraform plans from more than one estate.</p>
     <p>Apache-2.0. Built by <a href="https://prococonsulting.com">Kevin Proffitt</a>.</p>
   </footer>
 
