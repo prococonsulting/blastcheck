@@ -46,10 +46,13 @@ jobs:
       - run: pip install pyinstaller .
       # One file, so `curl | tar` yields a working tool and nothing else.
       # --collect-data ships the schema and packs, which live inside the package.
+      # --paths . is not optional: without it PyInstaller analyses the entry
+      # script from contrib/ and resolves `blastcheck` against site-packages
+      # rather than the checkout, and never finds blastcheck.cli.
       - run: |
-          pyinstaller --onefile --name blastcheck \
-            --collect-data blastcheck \
-            -c blastcheck/__main__.py
+          pyinstaller --onefile --name blastcheck --paths . \
+            --collect-submodules blastcheck --collect-data blastcheck \
+            contrib/pyinstaller_entry.py
           ./dist/blastcheck --version
           ./dist/blastcheck rules > /dev/null
       - run: tar -czf blastcheck-${{ matrix.name }}.tar.gz -C dist blastcheck
