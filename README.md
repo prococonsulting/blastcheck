@@ -43,7 +43,7 @@ Two limits, stated rather than papered over:
 
 Drift on a resource this plan does not touch is recorded under `extensions.drift_outside_this_plan` rather than invented into a change.
 
-blastcheck is a **producer, not a gate**. It emits the manifest and exits `0`; turning that into pass/fail is a separate policy layer (a CI gate). Exit codes reflect execution, not the verdict.
+blastcheck is a **producer, not a gate**. By default it emits the manifest and exits `0` whatever the verdict. `--fail-on` (below) lets you state your own threshold — that is the operator declaring a policy, not the tool deciding one.
 
 ## Coverage: every provider, in three layers
 
@@ -69,10 +69,48 @@ These findings are graded **`caution`, never `blocking`**, carry `confidence: lo
 
 ```
 pip install blastcheck
-terraform show -json plan.tfplan | blastcheck            # stdin
-blastcheck --plan plan.json > manifest.json              # from a file
-blastcheck --compact                                     # single-line JSON
+terraform show -json plan.tfplan | blastcheck            # readable summary
+blastcheck --plan plan.json > manifest.json              # the manifest, as JSON
 ```
+
+**On a terminal you get a summary; redirected or piped you get the manifest.** No flag needed either way, and `--json` / `--text` force it.
+
+```
+blastcheck 0.6.0 — 20 change(s) assessed, plan-only
+
+  BLOCKED  azurerm_network_security_group.web_tier
+           security      inline rule 'allow-ssh-temp': inbound Allow from ['*'] to
+                         port(s) ['22'] — opens sensitive access to the internet
+
+  UNKNOWN  azurerm_managed_disk.sql_data
+           reversibility `disk_size_gb` 512 -> 1024 cannot be reduced; permanent
+
+  6 further change(s) are undetermined only because live state was not queried.
+  3 change(s) had nothing to flag.
+
+verdict: blocked
+  4 change(s) report a catastrophic effect: ...
+
+  · state was never verified against reality — re-run with --live to certify
+```
+
+The baseline unknowns every plan-only change shares are summarised once rather than repeated per change, and a low-confidence finding is labelled `(pattern match, not a determination)` so a guess never looks like a determination in a terminal.
+
+## Gating
+
+```
+blastcheck --plan plan.json --fail-on blocked
+```
+
+| exit | meaning |
+|---|---|
+| 0 | ran fine, and the verdict did not trip your threshold |
+| 1 | **blastcheck could not run** — bad input, unreadable file |
+| 2 | **the verdict tripped `--fail-on`** |
+
+1 and 2 are deliberately distinct: a pipeline must be able to tell "this plan is dangerous" from "the tool is broken", because those call for opposite responses.
+
+`--fail-on` defaults to `never`. blastcheck stays a producer — what a verdict should do to your pipeline is your policy, not its decision. The flag just means you no longer have to parse JSON in shell to express a decision you already made.
 
 No hosted service, no network, no runtime dependencies — a default run works entirely against the plan file.
 
@@ -114,12 +152,9 @@ The manifest is uploaded as a build artifact and the verdict is posted on the pu
 
 ```yaml
 - uses: prococonsulting/blastcheck@v0
-  id: bc
   with:
     plan: plan.json
-
-- if: steps.bc.outputs.verdict == 'blocked'
-  run: exit 1
+    fail-on: blocked
 ```
 
 Note what you *cannot* write on a plan-only run: there is no `verdict == 'safe'` to gate on, because a plan-only run never emits one. A pipeline that proceeds only on a positive safety claim needs `--live`, and the credentials that implies. That is the honest ceiling of what a plan by itself can prove.
@@ -139,7 +174,7 @@ blastcheck implements the [Impact Manifest specification](https://github.com/pro
 
 ## Status
 
-v0.4 — draft, and evolving alongside the spec (which does not freeze at 1.0 until this tool has run against real Terraform plans).
+v0.6 — draft, and evolving alongside the spec (which does not freeze at 1.0 until this tool has run against real Terraform plans).
 
 ## Contributing and contact
 

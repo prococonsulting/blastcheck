@@ -66,44 +66,83 @@
   },
   "exposure": {
     "azurerm_storage_account": [
-      {"attribute": "public_network_access_enabled", "when_true": true, "kind": "exposure",
-       "detail": "public network access enabled on the storage account"},
-      {"attribute": "allow_nested_items_to_be_public", "when_true": true, "kind": "exposure",
-       "detail": "blob/container public access allowed"},
-      {"attribute": "min_tls_version", "when_decreases": true, "kind": "identity",
-       "detail": "minimum TLS version lowered"},
-      {"attribute": "shared_access_key_enabled", "when_true": true, "kind": "identity",
-       "detail": "shared access keys enabled, weakening identity-based access control"},
-      {"attribute": "https_traffic_only_enabled", "when_false": true, "kind": "identity",
-       "detail": "HTTPS-only traffic disabled, permitting plaintext access"}
+      {
+        "attribute": "shared_access_key_enabled",
+        "when_true": true,
+        "kind": "identity",
+        "detail": "shared access keys enabled, weakening identity-based access control"
+      },
+      {
+        "attribute": "https_traffic_only_enabled",
+        "when_false": true,
+        "kind": "identity",
+        "detail": "HTTPS-only traffic disabled, permitting plaintext access"
+      }
     ],
     "azurerm_key_vault": [
-      {"attribute": "purge_protection_enabled", "when_false": true, "kind": "audit",
-       "detail": "purge protection disabled, so a deleted vault and its secrets can be permanently destroyed"},
-      {"attribute": "public_network_access_enabled", "when_true": true, "kind": "exposure",
-       "detail": "public network access enabled on the key vault"}
+      {
+        "attribute": "purge_protection_enabled",
+        "when_false": true,
+        "kind": "audit",
+        "detail": "purge protection disabled, so a deleted vault and its secrets can be permanently destroyed"
+      },
+      {
+        "attribute": "public_network_access_enabled",
+        "when_true": true,
+        "kind": "exposure",
+        "detail": "public network access enabled on the key vault"
+      }
     ],
     "azurerm_mssql_server": [
-      {"attribute": "public_network_access_enabled", "when_true": true, "kind": "exposure",
-       "detail": "public network access enabled on the SQL server"},
-      {"attribute": "minimum_tls_version", "when_decreases": true, "kind": "identity",
-       "detail": "minimum TLS version lowered"}
+      {
+        "attribute": "public_network_access_enabled",
+        "when_true": true,
+        "kind": "exposure",
+        "detail": "public network access enabled on the SQL server"
+      },
+      {
+        "attribute": "minimum_tls_version",
+        "when_decreases": true,
+        "kind": "identity",
+        "detail": "minimum TLS version lowered"
+      }
     ],
     "azurerm_cosmosdb_account": [
-      {"attribute": "public_network_access_enabled", "when_true": true, "kind": "exposure",
-       "detail": "public network access enabled on the Cosmos DB account"}
+      {
+        "attribute": "public_network_access_enabled",
+        "when_true": true,
+        "kind": "exposure",
+        "detail": "public network access enabled on the Cosmos DB account"
+      }
     ],
     "azurerm_kubernetes_cluster": [
-      {"attribute": "private_cluster_enabled", "when_false": true, "kind": "exposure",
-       "detail": "the AKS API server is no longer private"},
-      {"attribute": "role_based_access_control_enabled", "when_false": true, "kind": "identity",
-       "detail": "Kubernetes RBAC disabled"}
+      {
+        "attribute": "private_cluster_enabled",
+        "when_false": true,
+        "kind": "exposure",
+        "detail": "the AKS API server is no longer private"
+      },
+      {
+        "attribute": "role_based_access_control_enabled",
+        "when_false": true,
+        "kind": "identity",
+        "detail": "Kubernetes RBAC disabled"
+      }
     ],
     "azurerm_container_registry": [
-      {"attribute": "public_network_access_enabled", "when_true": true, "kind": "exposure",
-       "detail": "public network access enabled on the container registry"},
-      {"attribute": "admin_enabled", "when_true": true, "kind": "identity",
-       "detail": "registry admin account enabled, creating a shared static credential"}
+      {
+        "attribute": "public_network_access_enabled",
+        "when_true": true,
+        "kind": "exposure",
+        "detail": "public network access enabled on the container registry"
+      },
+      {
+        "attribute": "admin_enabled",
+        "when_true": true,
+        "kind": "identity",
+        "detail": "registry admin account enabled, creating a shared static credential"
+      }
     ]
-  }
+  },
+  "_note_storage_account": "public_network_access_enabled, allow_nested_items_to_be_public and min_tls_version are deliberately absent: core.py implements them with richer messages that name the before and after values. A pack covers what code does not, rather than restating it."
 }

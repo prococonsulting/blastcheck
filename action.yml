@@ -14,6 +14,13 @@ inputs:
       Path to `terraform show -json` output. Produce it with
       `terraform show -json tfplan > plan.json` in an earlier step.
     required: true
+  fail-on:
+    description: >-
+      Fail the step when the verdict is this bad or worse: never (default),
+      blocked, unknown, caution. Left at `never`, blastcheck reports and the
+      pipeline decides.
+    required: false
+    default: "never"
   comment:
     description: Post the verdict as a pull-request comment. Requires GITHUB_TOKEN.
     required: false
@@ -32,6 +39,9 @@ inputs:
     default: manifest.json
 
 outputs:
+  gate:
+    description: 2 if the verdict tripped `fail-on`, 0 otherwise.
+    value: ${{ steps.run.outputs.gate }}
   verdict:
     description: The plan verdict — safe | caution | blocked | unknown.
     value: ${{ steps.run.outputs.verdict }}
@@ -56,14 +66,26 @@ runs:
       id: run
       shell: bash
       run: |
-        set -euo pipefail
-        blastcheck --plan "${{ inputs.plan }}" > "${{ inputs.output }}"
+        set -uo pipefail
+        blastcheck --plan "${{ inputs.plan }}" --json --fail-on "${{ inputs.fail-on }}" \
+          > "${{ inputs.output }}" && gate=0 || gate=$?
+        # 2 means the verdict tripped the caller's threshold; 1 means blastcheck
+        # could not run. Those need opposite responses, so they are kept apart.
+        if [ "$gate" = "1" ]; then echo "blastcheck failed to run"; exit 1; fi
+        echo "gate=$gate" >> "$GITHUB_OUTPUT"
         verdict=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['verdict']['decision'])" "${{ inputs.output }}")
         unknowns=$(python3 -c "import json,sys;print(str(json.load(open(sys.argv[1]))['verdict'].get('unknowns_present',False)).lower())" "${{ inputs.output }}")
         echo "verdict=$verdict"              >> "$GITHUB_OUTPUT"
         echo "unknowns_present=$unknowns"    >> "$GITHUB_OUTPUT"
         echo "manifest=${{ inputs.output }}" >> "$GITHUB_OUTPUT"
         echo "blastcheck verdict: $verdict"
+
+    - name: Fail the step if the caller asked for it
+      if: steps.run.outputs.gate == '2'
+      shell: bash
+      run: |
+        echo "::error::blastcheck verdict '${{ steps.run.outputs.verdict }}' met the fail-on threshold '${{ inputs.fail-on }}'"
+        exit 1
 
     - name: Upload the manifest
       if: inputs.upload-artifact == 'true'

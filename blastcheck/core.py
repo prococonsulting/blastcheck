@@ -44,7 +44,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .packs import load_packs
 
 SCHEMA_VERSION = "0.1.0"
-PRODUCER_VERSION = "0.5.0"
+PRODUCER_VERSION = "0.6.0"
 
 # Plan JSON format versions this tool has been exercised against. Terraform 0.12
 # emitted "0.1"; 1.x emits "1.x". Reading an unrecognised major without saying so
@@ -483,6 +483,18 @@ def _security(action: str, rtype: str, before: dict, after: dict,
                              "; ".join(h["detail"] for h in pack_hits), source="policy"))
 
     if concerns:
+        # A hand-written rule and a pack rule can cover the same attribute
+        # (azurerm storage public access is covered by both), and reporting a
+        # finding twice makes the tool look like it is padding.
+        # Longest first, then drop any detail that is a prefix of one already
+        # kept: two rules describing the same attribute differ by how much they
+        # say, and the fuller message is the one worth showing.
+        deduped = []
+        for c in sorted(concerns, key=lambda x: -len(str(x.get("detail", "")))):
+            d = str(c.get("detail", ""))
+            if not any(str(k.get("detail", "")).startswith(d) for k in deduped):
+                deduped.append(c)
+        concerns = deduped
         return ({"value": "widened", "concerns": concerns, "confidence": "high",
                  "rationale": "The plan's after-state widens exposure or weakens a control (see concerns).",
                  "evidence": [base + "-plan", ev_id]}, extra_ev)

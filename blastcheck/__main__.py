@@ -8,18 +8,32 @@ blastcheck is a PRODUCER, not a gate: it emits the manifest and exits 0 on
 success. Turning the manifest into a pass/fail decision is a separate policy
 layer (the CI gate). Exit codes reflect execution, not the verdict:
   0  a manifest was produced, or --verify confirmed a digest
-  1  bad input / no supported resources / --verify failed
+  1  blastcheck could not run: bad input, unreadable file, --verify failed
+  2  the verdict tripped the threshold the operator set with --fail-on
+
+1 and 2 are deliberately distinct. A pipeline must be able to tell "this plan is
+dangerous" apart from "the tool is broken", because those call for opposite
+responses.
+
+OUTPUT FORMAT
+
+Human-readable on a terminal, the manifest JSON when stdout is redirected or
+piped. So `blastcheck --plan p.json` is readable and
+`blastcheck --plan p.json > manifest.json` still writes a manifest, without
+anyone having to know a flag. `--json` and `--text` force it either way.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from .canonical import CanonicalizationError, attach_integrity, verify_integrity
 from .live import probe_plan, probe_recovery_plan, prober_for
 from .core import build_manifest, load_plan, PlanError, PRODUCER_VERSION
+from .render import FAIL_ON_LEVELS, gate_exit_code, render
 
 
 def main(argv=None) -> int:
@@ -29,6 +43,17 @@ def main(argv=None) -> int:
     )
     p.add_argument("--plan", metavar="FILE",
                    help="path to `terraform show -json` output; reads stdin if omitted")
+    p.add_argument("--json", dest="as_json", action="store_true",
+                   help="emit the Impact Manifest as JSON (the default when stdout is not a terminal)")
+    p.add_argument("--text", dest="as_text", action="store_true",
+                   help="emit the human-readable summary even when redirected")
+    p.add_argument("--fail-on", choices=sorted(FAIL_ON_LEVELS), default="never", metavar="LEVEL",
+                   help="exit 2 when the verdict is this bad or worse: "
+                        + ", ".join(sorted(FAIL_ON_LEVELS))
+                        + ". Default `never` — blastcheck is a producer, and what a verdict should do "
+                          "to your pipeline is your policy, not its decision.")
+    p.add_argument("--no-color", dest="no_color", action="store_true",
+                   help="disable colour (NO_COLOR in the environment does the same)")
     p.add_argument("--compact", action="store_true", help="emit compact JSON (default is indented)")
     p.add_argument("--sign", action="store_true",
                    help="attach integrity.digest over the JCS-canonicalized manifest (RFC 8785), "
@@ -120,10 +145,40 @@ def main(argv=None) -> int:
             print(f"blastcheck: cannot canonicalize for signing: {e}", file=sys.stderr)
             return 1
 
-    json.dump(manifest, sys.stdout, indent=None if args.compact else 2)
-    sys.stdout.write("\n")
-    return 0
+    # Format: explicit flags win; otherwise a terminal gets prose and a pipe
+    # gets the manifest, so redirection keeps working without a flag.
+    as_json = args.as_json or (not args.as_text and not sys.stdout.isatty())
+    try:
+        if as_json:
+            json.dump(manifest, sys.stdout, indent=None if args.compact else 2)
+            sys.stdout.write("\n")
+        else:
+            sys.stdout.write(render(manifest, sys.stdout,
+                                    colour=False if args.no_color else None))
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # `blastcheck ... | head` closes the pipe early. That is a normal way to
+        # use a CLI, not an error, and a Python traceback in response makes the
+        # tool look broken. Redirect the remaining stdout to devnull so the
+        # interpreter's own shutdown flush cannot raise a second time.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        return 0
+
+    return gate_exit_code(manifest, args.fail_on)
+
+
+def _entry() -> int:
+    try:
+        return main()
+    except KeyboardInterrupt:
+        # 130 is the conventional shell code for SIGINT. Silent, because a user
+        # who pressed Ctrl-C does not need a stack trace explaining it.
+        print("", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_entry())
