@@ -31,9 +31,11 @@ import os
 import sys
 
 from .canonical import CanonicalizationError, attach_integrity, verify_integrity
+from .config import apply_ignores, load_config
+from .plans import PlanReadError, read_plan_text
 from .live import probe_plan, probe_recovery_plan, prober_for
 from .core import build_manifest, load_plan, PlanError, PRODUCER_VERSION
-from .render import FAIL_ON_LEVELS, gate_exit_code, render
+from .render import FAIL_ON_LEVELS, gate_exit_code, render, render_rules
 
 
 def main(argv=None) -> int:
@@ -41,8 +43,14 @@ def main(argv=None) -> int:
         prog="blastcheck",
         description="Emit an Impact Manifest (change-safety assertion) from a `terraform show -json` plan.",
     )
+    p.add_argument("target", nargs="?", metavar="PLAN|rules",
+                   help="a `terraform show -json` file, a saved .tfplan (converted automatically), "
+                        "or the word `rules` to list what blastcheck knows. Reads stdin if omitted.")
     p.add_argument("--plan", metavar="FILE",
-                   help="path to `terraform show -json` output; reads stdin if omitted")
+                   help="same as the positional argument; kept for scripts that already use it")
+    p.add_argument("--config", metavar="FILE",
+                   help="path to a blastcheck config file (default: .blastcheck.json, searched "
+                        "upward from the working directory)")
     p.add_argument("--json", dest="as_json", action="store_true",
                    help="emit the Impact Manifest as JSON (the default when stdout is not a terminal)")
     p.add_argument("--text", dest="as_text", action="store_true",
@@ -71,6 +79,25 @@ def main(argv=None) -> int:
     p.add_argument("--version", action="version", version=f"blastcheck {PRODUCER_VERSION}")
     args = p.parse_args(argv)
 
+    # `blastcheck rules` — show what this build actually knows. Without it the
+    # 110 precisely-classified types and 41 pack rules are invisible, and a tool
+    # whose knowledge you cannot inspect reads as a toy.
+    if args.target == "rules":
+        sys.stdout.write(render_rules(colour=False if args.no_color else None,
+                                      stream=sys.stdout))
+        return 0
+
+    config = load_config(explicit=args.config)
+    for err in config.errors:
+        print(f"blastcheck: ignoring unreadable config ({err})", file=sys.stderr)
+    # Explicit flags beat the file; the file beats the built-in default.
+    if args.fail_on == "never" and config.fail_on in FAIL_ON_LEVELS:
+        args.fail_on = config.fail_on
+    if not args.live and config.live:
+        args.live = config.live
+    if config.live_timeout and args.live_timeout == 20.0:
+        args.live_timeout = float(config.live_timeout)
+
     # --verify is a distinct mode: it consumes a manifest, not a plan.
     if args.verify:
         try:
@@ -92,11 +119,14 @@ def main(argv=None) -> int:
                   "has been modified since it was signed", file=sys.stderr)
         return 1
 
+    plan_path = args.plan or args.target
     try:
-        text = open(args.plan, encoding="utf-8").read() if args.plan else sys.stdin.read()
-    except OSError as e:
-        print(f"blastcheck: cannot read plan: {e}", file=sys.stderr)
+        text, note = read_plan_text(plan_path, None if plan_path else sys.stdin.read())
+    except PlanReadError as e:
+        print(f"blastcheck: {e}", file=sys.stderr)
         return 1
+    if note:
+        print(f"blastcheck: {plan_path} {note}", file=sys.stderr)
 
     try:
         plan = load_plan(text)
@@ -122,6 +152,11 @@ def main(argv=None) -> int:
                   file=sys.stderr)
             observations = {}
         else:
+            total = sum(1 for rc in (plan.get("resource_changes") or [])
+                        if not (set((rc.get("change") or {}).get("actions") or []) <= {"no-op", "read"}))
+            # A silent minute while 200 resources are probed reads as a hang.
+            print(f"blastcheck: reading live state for {total} resource(s) via {prober.name} "
+                  f"(up to {args.live_timeout:.0f}s each)...", file=sys.stderr)
             observations = probe_plan(plan, prober)
             usable = sum(1 for o in observations.values() if o.usable)
             recovery = probe_recovery_plan(plan, prober)
@@ -137,6 +172,12 @@ def main(argv=None) -> int:
     except PlanError as e:
         print(f"blastcheck: {e}", file=sys.stderr)
         return 1
+
+    manifest = apply_ignores(manifest, config)
+    if config.source and (manifest.get("extensions") or {}).get("ignored"):
+        n = len((manifest["extensions"] or {}).get("ignored") or {})
+        print(f"blastcheck: {n} change(s) downgraded by ignore rules in {config.source} "
+              "(findings are kept in the manifest)", file=sys.stderr)
 
     if args.sign:
         try:

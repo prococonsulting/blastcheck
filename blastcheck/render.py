@@ -36,7 +36,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, TextIO
 
-__all__ = ["render", "supports_colour", "gate_exit_code", "FAIL_ON_LEVELS"]
+__all__ = ["render", "render_rules", "supports_colour", "gate_exit_code", "FAIL_ON_LEVELS"]
 
 # Order matters: worst first, which is also the order a reader should meet them.
 _SEVERITY_ORDER = ["blocking", "unknown", "caution", "informational"]
@@ -192,6 +192,11 @@ def render(manifest: Dict[str, Any], stream: Optional[TextIO] = None,
 
     # Things a reader would be wrong not to know about.
     notes: List[str] = []
+    if ext.get("ignored"):
+        n = len(ext["ignored"])
+        src = ext.get("config_source", "configuration")
+        notes.append(f"{n} change(s) were downgraded by ignore rules in {src}. Their findings are "
+                     "unchanged and still in the manifest; only the severity was lowered.")
     if ext.get("drift_outside_this_plan"):
         n = len(ext["drift_outside_this_plan"])
         notes.append(f"{n} resource(s) outside this plan have also drifted from recorded state")
@@ -242,3 +247,65 @@ def gate_exit_code(manifest: Dict[str, Any], fail_on: str) -> int:
     triggers = FAIL_ON_LEVELS.get(fail_on or "never", set())
     decision = (manifest.get("verdict") or {}).get("decision", "unknown")
     return 2 if decision in triggers else 0
+
+
+def render_rules(colour: Optional[bool] = None, stream: Optional[TextIO] = None) -> str:
+    """What this build actually knows.
+
+    Without this the 110 precisely-classified types and the pack rules behind
+    them are invisible, and a tool whose knowledge you cannot inspect reads as a
+    toy however much of it there is. It also makes the layer boundary concrete:
+    a type listed here is assessed precisely, and a type absent from it still
+    gets Layer 0 and Layer 1 — less certainly, and the manifest says so."""
+    from .core import PACK
+    from .live import _PROBERS
+
+    stream = stream or sys.stdout
+    ink = _Ink(supports_colour(stream) if colour is None else colour)
+    out: List[str] = []
+
+    out.append(ink("Provider packs", "bold"))
+    if PACK.errors:
+        for e in PACK.errors:
+            out.append("  " + ink(f"unreadable pack: {e}", "blocking"))
+    for provider in sorted(set(PACK.providers)):
+        prefix = provider if provider != "azurerm" else "azurerm"
+        types = sorted(t for t in PACK.precise if t.startswith(prefix.split("_")[0]))
+        rules = sum(len(v) for k, v in PACK.exposure.items() if k.startswith(prefix.split("_")[0]))
+        oneway = sum(1 for k in PACK.one_way_growth if k.startswith(prefix.split("_")[0]))
+        out.append(f"  {provider:<10} {len(types):>4} types   {rules:>3} exposure rules   "
+                   f"{oneway:>2} one-way attributes")
+    out.append("")
+
+    out.append(ink("Classification", "bold"))
+    out.append(f"  data-bearing   {len(PACK.data_bearing):>4}   a delete risks losing something")
+    out.append(f"  stateless      {len(PACK.stateless):>4}   recreatable from configuration")
+    out.append(f"  compute        {len(PACK.compute):>4}   serves traffic; durability depends on attachments")
+    out.append("")
+
+    out.append(ink("One-way attributes", "bold") + ink("   increasing these cannot be undone", "dim"))
+    for rtype in sorted(PACK.one_way_growth):
+        for attr, why in sorted(PACK.one_way_growth[rtype].items()):
+            out.append(f"  {rtype}.{attr}")
+            for line in _wrap(why, 78):
+                out.append("      " + ink(line, "dim"))
+    out.append("")
+
+    out.append(ink("Live probers", "bold"))
+    for name in sorted(_PROBERS):
+        out.append(f"  {name:<10} reads live state through the `{ 'az' if name=='azure' else name }` "
+                   f"CLI and your existing login")
+    out.append("")
+
+    out.append(ink("Everything else", "bold"))
+    for line in _wrap(
+        "A resource type absent from the packs above is still assessed — by action semantics, "
+        "drift, unreadable fields, and attribute-name patterns — at low confidence, graded "
+        "`caution` rather than `blocking`, with its evidence tagged `heuristic`. Nothing is "
+        "skipped for being unfamiliar.", 84):
+        out.append("  " + line)
+    out.append("")
+    out.append(ink("  Add precision for a provider by dropping a JSON file into blastcheck/packs/ — "
+                   "no Python required. See CONTRIBUTING.md.", "dim"))
+    out.append("")
+    return "\n".join(out)

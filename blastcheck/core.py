@@ -44,7 +44,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .packs import load_packs
 
 SCHEMA_VERSION = "0.1.0"
-PRODUCER_VERSION = "0.6.0"
+PRODUCER_VERSION = "0.7.0"
 
 # Plan JSON format versions this tool has been exercised against. Terraform 0.12
 # emitted "0.1"; 1.x emits "1.x". Reading an unrecognised major without saying so

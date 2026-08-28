@@ -68,9 +68,14 @@ These findings are graded **`caution`, never `blocking`**, carry `confidence: lo
 ## Install & use
 
 ```
-pip install blastcheck
-terraform show -json plan.tfplan | blastcheck            # readable summary
-blastcheck --plan plan.json > manifest.json              # the manifest, as JSON
+pip install blastcheck                  # or: brew install prococonsulting/tap/blastcheck
+                                        # or: download a single binary from Releases
+
+blastcheck plan.json                    # readable summary
+blastcheck tfplan                       # a saved plan, converted for you
+terraform show -json tfplan | blastcheck
+blastcheck plan.json > manifest.json    # the manifest, as JSON
+blastcheck rules                        # what this build actually knows
 ```
 
 **On a terminal you get a summary; redirected or piped you get the manifest.** No flag needed either way, and `--json` / `--text` force it.
@@ -95,6 +100,22 @@ verdict: blocked
 ```
 
 The baseline unknowns every plan-only change shares are summarised once rather than repeated per change, and a low-confidence finding is labelled `(pattern match, not a determination)` so a guess never looks like a determination in a terminal.
+
+## Configuration
+
+Drop a `.blastcheck.json` anywhere above your working directory:
+
+```json
+{
+  "fail_on": "blocked",
+  "live": "azure",
+  "ignore": ["module.sandbox.*", "aws_s3_bucket.scratch"]
+}
+```
+
+Command-line flags always win over the file.
+
+**An ignore does not delete a finding.** It lowers that change's severity to `informational` so it stops gating a pipeline, and everything else stays exactly as it was — the concerns, the rationale, the evidence. The manifest records which pattern suppressed it under `extensions.ignored`, with the severity it originally had. A config file that could make a finding *vanish* would be the most effective way yet invented to produce a false `safe`, and it would be invisible to whoever reads the manifest afterwards.
 
 ## Gating
 
@@ -174,7 +195,7 @@ blastcheck implements the [Impact Manifest specification](https://github.com/pro
 
 ## Status
 
-v0.6 — draft, and evolving alongside the spec (which does not freeze at 1.0 until this tool has run against real Terraform plans).
+v0.7 — draft, and evolving alongside the spec (which does not freeze at 1.0 until this tool has run against real Terraform plans).
 
 ## Contributing and contact
 

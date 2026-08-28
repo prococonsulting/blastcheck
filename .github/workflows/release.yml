@@ -1,0 +1,82 @@
+name: release
+
+# Tag-driven so a release cannot disagree with the code that produced it: the
+# only way to publish is to push a version tag, and every artifact is built from
+# that exact commit rather than from whatever happened to be on a laptop.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write        # create the GitHub release
+  id-token: write        # PyPI Trusted Publishing — no API token on anyone's machine
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[test]"
+      - run: pytest -q
+      # A tag that disagrees with the packaged version is the kind of mistake
+      # that stays invisible until someone installs the wrong thing.
+      - name: Tag must match the package version
+        run: |
+          pkg=$(python -c "import blastcheck; print(blastcheck.__version__)")
+          tag="${GITHUB_REF_NAME#v}"
+          echo "package=$pkg tag=$tag"
+          [ "$pkg" = "$tag" ] || { echo "::error::tag $tag != package version $pkg"; exit 1; }
+
+  binaries:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux-x86_64 }
+          - { os: macos-latest,  name: macos-arm64 }
+          - { os: macos-13,      name: macos-x86_64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pyinstaller .
+      # One file, so `curl | tar` yields a working tool and nothing else.
+      # --collect-data ships the schema and packs, which live inside the package.
+      - run: |
+          pyinstaller --onefile --name blastcheck \
+            --collect-data blastcheck \
+            -c blastcheck/__main__.py
+          ./dist/blastcheck --version
+          ./dist/blastcheck rules > /dev/null
+      - run: tar -czf blastcheck-${{ matrix.name }}.tar.gz -C dist blastcheck
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.name }}
+          path: blastcheck-${{ matrix.name }}.tar.gz
+
+  publish:
+    needs: [check, binaries]
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install build twine
+      - run: python -m build && twine check dist/*
+      - uses: actions/download-artifact@v4
+        with: { pattern: binary-*, merge-multiple: true, path: binaries }
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "blastcheck $GITHUB_REF_NAME" \
+            --generate-notes \
+            binaries/*.tar.gz dist/*
