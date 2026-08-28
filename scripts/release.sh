@@ -12,18 +12,21 @@
 # wheel missing its schema, two racing release runs from a double tag push,
 # and a job queued forever on a runner label that no longer exists.
 #
-# Nothing is force-pushed. The tag is only created after the tests pass and a
-# real wheel has been installed and exercised.
+# The version tag is only created after the tests pass and a real wheel has
+# been installed and exercised. The only force-push anywhere in here is the
+# floating major tag (v0), which is the one ref that is meant to move.
 
 set -euo pipefail
 
 VERSION="${1:-}"
-REPO="prococonsulting/blastcheck"
+OWNER="prococonsulting"
+REPO="${OWNER}/blastcheck"
 API="https://api.github.com/repos/${REPO}"
 
 die() { printf '\n\033[31merror\033[0m  %s\n\n' "$*" >&2; exit 1; }
 say() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 ok()  { printf '\033[32m ok \033[0m %s\n' "$*"; }
+warn(){ printf '\033[33mnote\033[0m  %s\n' "$*"; }
 
 [ -n "$VERSION" ] || die "usage: scripts/release.sh <version>    e.g. scripts/release.sh 0.8.0"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must look like 1.2.3, got '$VERSION'"
@@ -127,6 +130,16 @@ git tag -a "v$VERSION" -m "blastcheck $VERSION"
 git push --quiet origin "v$VERSION"
 ok "tagged v$VERSION"
 
+# The floating major tag is what `uses: prococonsulting/blastcheck@v0` resolves
+# to, and it is the one tag that is *supposed* to move -- so -f is correct here
+# and nowhere else in this script. Left alone it silently serves stale code to
+# every workflow that depends on it: it sat on a pre-0.7.0 commit for a full
+# release cycle, and nothing anywhere reported that as a problem.
+major="v${VERSION%%.*}"
+git tag -f "$major" "v$VERSION^{}" >/dev/null
+git push --quiet -f origin "$major"
+ok "moved $major to v$VERSION"
+
 # --------------------------------------------------------------------- watch
 
 say "waiting for the release workflow to appear"
@@ -204,10 +217,41 @@ say "confirming PyPI is serving $VERSION"
 for _ in $(seq 1 20); do
   if curl -sSf "https://pypi.org/simple/blastcheck/" 2>/dev/null | grep -q "blastcheck-${VERSION}-"; then
     ok "PyPI has $VERSION"
+
+    # The formula is only updated now, not earlier: it is generated from the
+    # sdist PyPI is serving, so it cannot be written until PyPI is serving one.
+    # That ordering is the whole reason a formula can never point at an
+    # artifact that does not exist.
+    if curl -sS -o /dev/null -w '%{http_code}' "https://github.com/${OWNER}/homebrew-tap" 2>/dev/null | grep -q 200; then
+      say "updating the Homebrew formula"
+      contrib/update-formula.sh "$VERSION" >/dev/null
+      taptmp=$(mktemp -d)
+      if git clone --quiet "https://github.com/${OWNER}/homebrew-tap.git" "$taptmp/tap" 2>/dev/null; then
+        cp contrib/blastcheck.rb "$taptmp/tap/Formula/blastcheck.rb"
+        if [ -n "$(git -C "$taptmp/tap" status --porcelain)" ]; then
+          git -C "$taptmp/tap" add Formula/blastcheck.rb
+          git -C "$taptmp/tap" commit -qm "blastcheck $VERSION"
+          git -C "$taptmp/tap" push --quiet origin HEAD && ok "tap updated to $VERSION"
+        else
+          ok "tap already at $VERSION"
+        fi
+      else
+        warn "could not clone the tap -- run contrib/update-formula.sh $VERSION and push it by hand"
+      fi
+      rm -rf "$taptmp"
+      # The formula edit is a real change to this repo; keep the two in step.
+      if [ -n "$(git status --porcelain contrib/blastcheck.rb)" ]; then
+        git add contrib/blastcheck.rb
+        git commit -qm "Point the formula at $VERSION"
+        git push --quiet origin main
+      fi
+    else
+      warn "no homebrew tap yet -- run scripts/setup-tap.sh once to create it"
+    fi
+
     printf '\n\033[32mreleased\033[0m  blastcheck %s\n' "$VERSION"
     printf '  https://github.com/%s/releases/tag/v%s\n' "$REPO" "$VERSION"
-    printf '  https://pypi.org/project/blastcheck/%s/\n' "$VERSION"
-    printf '\n  brew formula still needs:  contrib/update-formula.sh %s\n\n' "$VERSION"
+    printf '  https://pypi.org/project/blastcheck/%s/\n\n' "$VERSION"
     exit 0
   fi
   sleep 15
