@@ -1,0 +1,80 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "resource_changes": [
+    {
+      "address": "azurerm_managed_disk.doomed",
+      "mode": "managed",
+      "type": "azurerm_managed_disk",
+      "name": "doomed",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "id": "/subscriptions/aaaabbbb-cccc-dddd-eeee-ffff00001111/resourceGroups/rg-data/providers/Microsoft.Compute/disks/doomed",
+          "name": "doomed",
+          "disk_size_gb": 256,
+          "storage_account_type": "Premium_LRS"
+        },
+        "after": null
+      }
+    },
+    {
+      "address": "aws_instance.web",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "web",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["update"],
+        "before": {
+          "id": "i-0abc123def456",
+          "instance_type": "t3.medium"
+        },
+        "after": {
+          "id": "i-0abc123def456",
+          "instance_type": "t3.large"
+        }
+      }
+    },
+    {
+      "address": "azurerm_network_interface.fresh",
+      "mode": "managed",
+      "type": "azurerm_network_interface",
+      "name": "fresh",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": { "name": "nic-fresh", "location": "eastus2" },
+        "after_unknown": { "id": true }
+      }
+    },
+    {
+      "address": "azurerm_managed_disk.no_recorded_id",
+      "mode": "managed",
+      "type": "azurerm_managed_disk",
+      "name": "no_recorded_id",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "stateless-entry",
+          "disk_size_gb": 64
+        },
+        "after": null
+      }
+    },
+    {
+      "address": "mystery_resource.orphan",
+      "mode": "managed",
+      "type": "mystery_resource",
+      "name": "orphan",
+      "change": {
+        "actions": ["update"],
+        "before": { "id": "opaque-12345", "setting": "a" },
+        "after": { "id": "opaque-12345", "setting": "b" }
+      }
+    }
+  ]
+}

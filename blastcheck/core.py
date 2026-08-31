@@ -43,8 +43,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .packs import load_packs
 
-SCHEMA_VERSION = "0.1.0"
-PRODUCER_VERSION = "0.7.0"
+SCHEMA_VERSION = "0.2.0"
+PRODUCER_VERSION = "0.8.0"
 
 # Plan JSON format versions this tool has been exercised against. Terraform 0.12
 # emitted "0.1"; 1.x emits "1.x". Reading an unrecognised major without saying so
@@ -822,7 +822,8 @@ def _live_recovery(rec: Any, action: str, rtype: str, base: str,
 
 def analyze_change(index: int, rc: Dict[str, Any],
                    drift: Optional[Dict[str, Any]] = None,
-                   obs: Any = None, rec: Any = None) -> Tuple[Dict[str, Any], List[dict]]:
+                   obs: Any = None, rec: Any = None,
+                   include_provider_ids: bool = False) -> Tuple[Dict[str, Any], List[dict]]:
     addr = str(rc.get("address", ""))
     rtype = str(rc.get("type", ""))
     change = rc.get("change") or {}
@@ -897,6 +898,35 @@ def analyze_change(index: int, rc: Dict[str, Any],
           "severity": severity, "rationale": rationale}
     if rc.get("provider_name"):
         ch["provider"] = str(rc["provider_name"])
+
+    # Provider identifier (spec v0.2.0), opt-in because these IDs embed
+    # account and grouping information (subscription GUIDs, account ids).
+    # The absence rule is the spec's: on a pure create no identifier can
+    # exist, so absence carries no signal; on an existing resource, absence
+    # means resolution failed and the reason belongs in the evidence pool.
+    # Both-or-neither with `provider`: a bare id (an AWS `i-0abc...`) is not
+    # globally unique, so an id whose kind is unknown is not a join key and
+    # is withheld rather than emitted uninterpretable.
+    if include_provider_ids and set(actions_raw) & {"update", "delete", "replace"}:
+        pid = before.get("id")
+        before_sensitive = change.get("before_sensitive")
+        id_sensitive = (isinstance(before_sensitive, dict)
+                        and before_sensitive.get("id") is True)
+        why = None
+        if not isinstance(pid, str) or not pid:
+            why = "change.before.id is absent or not a string in the plan"
+        elif id_sensitive:
+            why = "change.before.id is marked sensitive in the plan"
+        elif "provider" not in ch:
+            why = ("the plan records no provider_name, so the kind of "
+                   "identifier is unknown and the id alone is not a safe "
+                   "join key")
+        if why is None:
+            ch["provider_id"] = pid
+        else:
+            evidence.append(_ev(f"{base}-pid",
+                                f"resource_changes[] where address == {addr} -> change.before.id",
+                                f"provider id not emitted: {why}"))
     return ch, evidence
 
 
@@ -966,7 +996,8 @@ def _live_access(observations: Optional[Dict[str, Any]]) -> str:
 
 def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None,
                    observations: Optional[Dict[str, Any]] = None,
-                   recovery: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                   recovery: Optional[Dict[str, Any]] = None,
+                   include_provider_ids: bool = False) -> Dict[str, Any]:
     now = now or datetime.now(timezone.utc)
 
     # Terraform's refresh findings, keyed by address. See _state_confidence().
@@ -1000,7 +1031,8 @@ def build_manifest(plan: Dict[str, Any], now: Optional[datetime] = None,
         addr_i = str(rc.get("address", ""))
         ch, ev = analyze_change(i, rc, drift_by_address.get(addr_i),
                                 (observations or {}).get(addr_i),
-                                (recovery or {}).get(addr_i))
+                                (recovery or {}).get(addr_i),
+                                include_provider_ids=include_provider_ids)
         changes.append(ch)
         evidence.extend(ev)
 

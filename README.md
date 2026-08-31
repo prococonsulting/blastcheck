@@ -119,6 +119,35 @@ Command-line flags always win over the file.
 
 **An ignore does not delete a finding.** It lowers that change's severity to `informational` so it stops gating a pipeline, and everything else stays exactly as it was — the concerns, the rationale, the evidence. The manifest records which pattern suppressed it under `extensions.ignored`, with the severity it originally had. A config file that could make a finding *vanish* would be the most effective way yet invented to produce a false `safe`, and it would be invisible to whoever reads the manifest afterwards.
 
+## Provider identifiers: `--include-provider-ids`
+
+```
+blastcheck plan.json --include-provider-ids > manifest.json
+```
+
+A Terraform address maps to no cloud API's own identifier, so a tool
+joining a manifest to live state (cost, dependencies, tenancy) has to
+guess by type and name. This flag closes that gap: each change that
+operates on an existing resource gains a `provider_id` carrying the
+provider's own identifier, verbatim from the plan's recorded state
+(`before.id`), paired with the `provider` field so a consumer knows what
+kind of identifier it holds. A change created from nothing has no
+identifier yet; an existing resource whose identifier could not be
+resolved says so in the evidence pool rather than staying silently blank.
+
+**Off by default, and that is the point.** Provider identifiers expose
+your account layout: an Azure resource ID contains the subscription GUID
+and resource group name, an AWS ARN contains the account id, a GCP
+resource name contains the project id. Without the flag a manifest is
+safe to paste into a PR comment or a CI log; with it, it is not. Do not
+post an id-bearing manifest to public PR comments, public CI logs, issue
+trackers, or any channel wider than the people allowed to know your
+account layout. The flag is deliberately not available in
+`.blastcheck.json`: a config file is inherited invisibly from parent
+directories, and turning identifier exposure on invisibly is exactly the
+failure the default prevents. Emitting them is an explicit,
+per-invocation choice.
+
 ## Gating
 
 ```
@@ -200,7 +229,7 @@ blastcheck implements the [Impact Manifest specification](https://github.com/pro
 
 ## Status
 
-v0.7 — draft, and evolving alongside the spec (which does not freeze at 1.0 until this tool has run against real Terraform plans).
+v0.8 — draft, and evolving alongside the spec (which does not freeze at 1.0 until this tool has run against real Terraform plans).
 
 ## Contributing and contact
 

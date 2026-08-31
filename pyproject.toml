@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blastcheck"
-version = "0.7.0"
+version = "0.8.0"
 description = "Reference producer of Impact Manifest change-safety assertions from a Terraform plan"
 readme = "README.md"
 requires-python = ">=3.9"

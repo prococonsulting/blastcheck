@@ -76,6 +76,14 @@ def main(argv=None) -> int:
                         "only mode in which a `safe` verdict is reachable.")
     p.add_argument("--live-timeout", type=float, default=20.0, metavar="SECONDS",
                    help="per-resource timeout for live reads (default: 20)")
+    p.add_argument("--include-provider-ids", action="store_true",
+                   help="embed each cloud's own resource identifier (from the plan's "
+                        "recorded state) in the manifest, so downstream tools can join "
+                        "to live state without guessing. OFF by default because these "
+                        "identifiers expose account layout (subscription GUIDs, account "
+                        "ids, project ids) - an id-bearing manifest is not safe to paste "
+                        "into a public PR comment or CI log. Deliberately not a config-"
+                        "file option: inclusion is an explicit per-invocation choice.")
     p.add_argument("--version", action="version", version=f"blastcheck {PRODUCER_VERSION}")
     args = p.parse_args(argv)
 
@@ -168,7 +176,8 @@ def main(argv=None) -> int:
                       "resource(s) being destroyed", file=sys.stderr)
 
     try:
-        manifest = build_manifest(plan, observations=observations, recovery=recovery)
+        manifest = build_manifest(plan, observations=observations, recovery=recovery,
+                                  include_provider_ids=args.include_provider_ids)
     except PlanError as e:
         print(f"blastcheck: {e}", file=sys.stderr)
         return 1
